@@ -19,7 +19,7 @@ JSONBIN_SCHEDULES = os.environ.get("JSONBIN_SCHEDULES")
 JSONBIN_MEMORIES = os.environ.get("JSONBIN_MEMORIES")
 JSONBIN_CHAT_LOGS = os.environ.get("JSONBIN_CHAT_LOGS")
 
-# 每个 API 的 token 上限（留一半给回复）
+# 每个 API 的 token 上限
 API_TOKEN_LIMITS = {
     "第三方sonnet": 110000,
     "sonnet": 190000,
@@ -245,7 +245,6 @@ def is_dm_channel(channel):
 # ========== 历史记录管理 ==========
 
 def estimate_tokens(text):
-    """估算 token 数（中文约 2 字符/token，英文约 4 字符/token）"""
     if not text:
         return 0
     chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', str(text)))
@@ -253,7 +252,6 @@ def estimate_tokens(text):
     return int(chinese_chars / 1.5 + other_chars / 4)
 
 def trim_history_for_api(history, api_name):
-    """根据 API 的 token 上限裁剪历史"""
     max_tokens = API_TOKEN_LIMITS.get(api_name, 100000)
     
     total_tokens = sum(estimate_tokens(m.get("content", "")) for m in history)
@@ -387,7 +385,6 @@ def parse_hidden_commands(reply, user_id):
     has_hidden = False
     original_reply = reply
 
-    # 定时
     timed = re.findall(r'\[\[定时\|(\d{1,2}:\d{2})\|(.+?)\]\]', reply)
     for time_str, hint in timed:
         schedules[user_id]["timed"].append({
@@ -398,7 +395,6 @@ def parse_hidden_commands(reply, user_id):
         reply = reply.replace(f"[[定时|{time_str}|{hint}]]", "")
         has_hidden = True
 
-    # 每日
     daily = re.findall(r'\[\[每日\|(\d{1,2}:\d{2})\|(.+?)\]\]', reply)
     for time_str, topic in daily:
         schedules[user_id]["daily"].append({
@@ -408,7 +404,6 @@ def parse_hidden_commands(reply, user_id):
         reply = reply.replace(f"[[每日|{time_str}|{topic}]]", "")
         has_hidden = True
 
-    # 记忆
     mems_with_user = re.findall(r'\[\[记忆\|([A-Z0-9]+)\|(.+?)\]\]', reply)
     for mem_user_id, content in mems_with_user:
         add_memory(mem_user_id, content)
@@ -422,7 +417,6 @@ def parse_hidden_commands(reply, user_id):
             reply = reply.replace(f"[[记忆|{content}]]", "")
             has_hidden = True
 
-    # 特殊日期
     dates = re.findall(r'\[\[特殊日期\|(\d{2}-\d{2})\|(.+?)\]\]', reply)
     for date, desc in dates:
         schedules[user_id]["special_dates"][date] = desc
@@ -510,7 +504,6 @@ def download_image(url):
 # ========== 处理确认 ==========
 
 def handle_confirmation(user_id, channel, text):
-    """处理用户的确认回复"""
     if user_id not in pending_confirmations:
         return False
     
@@ -552,7 +545,6 @@ def handle_confirmation(user_id, channel, text):
 # ========== 处理消息 ==========
 
 def process_message(user_id, channel, text, images=None):
-    # 检查是否是确认回复
     if handle_confirmation(user_id, channel, text):
         return
     
@@ -859,45 +851,46 @@ def commands():
 
     return jsonify({"response_type": "ephemeral", "text": "未知命令"})
 
-# ========== Cron ==========
+# ========== 后台定时任务线程 ==========
 
-@app.route("/cron", methods=["GET", "POST"])
-def cron_job():
-    try:
-        now = get_cn_time()
-        current_time = now.strftime("%H:%M")
-        current_date = now.strftime("%m-%d")
-        hour = now.hour
+def run_scheduler():
+    """后台线程：每分钟检查定时任务"""
+    while True:
+        try:
+            now = get_cn_time()
+            current_time = now.strftime("%H:%M")
+            current_date = now.strftime("%m-%d")
+            hour = now.hour
 
-        # 每天 0:00 重置积分
-        if current_time == "00:00":
+            print(f"[Scheduler] 检查时间: {current_time}")
+
+            # 每天 0:00 重置积分
+            if current_time == "00:00":
+                all_data = load_user_data()
+                for uid in all_data:
+                    all_data[uid]["points_used"] = 0
+                save_user_data(all_data)
+                print("[Scheduler] 积分已重置")
+
             all_data = load_user_data()
-            for uid in all_data:
-                all_data[uid]["points_used"] = 0
-            save_user_data(all_data)
-            print("积分已重置")
+            schedules = load_schedules()
 
-        print(f"Cron: {current_time}")
+            for user_id, user in all_data.items():
+                channel = user.get("channel")
+                if not channel:
+                    continue
 
-        all_data = load_user_data()
-        schedules = load_schedules()
+                user_schedules = schedules.get(user_id, {"timed": [], "daily": [], "special_dates": {}})
+                current_api = user.get("api", DEFAULT_API)
+                memories = format_memories(user_id, show_numbers=False)
 
-        for user_id, user in all_data.items():
-            channel = user.get("channel")
-            if not channel:
-                continue
-
-            user_schedules = schedules.get(user_id, {"timed": [], "daily": [], "special_dates": {}})
-            current_api = user.get("api", DEFAULT_API)
-            memories = format_memories(user_id, show_numbers=False)
-
-            # 定时消息
-            timed = user_schedules.get("timed", [])
-            new_timed = []
-            for item in timed:
-                if item["time"] == current_time and item.get("date") == now.strftime("%Y-%m-%d"):
-                    hint = item.get("hint", "")
-                    system = f"""当前时间: {get_time_str()}
+                # 定时消息
+                timed = user_schedules.get("timed", [])
+                new_timed = []
+                for item in timed:
+                    if item["time"] == current_time and item.get("date") == now.strftime("%Y-%m-%d"):
+                        hint = item.get("hint", "")
+                        system = f"""当前时间: {get_time_str()}
 
 记忆：{memories if memories else "无"}
 
@@ -908,26 +901,27 @@ def cron_job():
 - 直接发消息给用户
 - 如果觉得现在不合适，回复：[不发]"""
 
-                    messages = [{"role": "system", "content": system}]
-                    history = trim_history_for_api(user.get("history", [])[-10:], current_api)
-                    messages.extend(history)
+                        messages = [{"role": "system", "content": system}]
+                        history = trim_history_for_api(user.get("history", [])[-10:], current_api)
+                        messages.extend(history)
 
-                    reply = call_ai(messages, current_api)
+                        reply = call_ai(messages, current_api)
 
-                    if "[不发]" not in reply:
-                        visible, _, _ = parse_hidden_commands(reply, user_id)
-                        if visible.strip():
-                            send_slack(channel, visible)
-                            log_message(channel, "assistant", f"[定时] {visible}", model="AI")
-                else:
-                    new_timed.append(item)
-            user_schedules["timed"] = new_timed
+                        if "[不发]" not in reply:
+                            visible, _, _ = parse_hidden_commands(reply, user_id)
+                            if visible.strip():
+                                send_slack(channel, visible)
+                                log_message(channel, "assistant", f"[定时] {visible}", model="AI")
+                                print(f"[Scheduler] 发送定时消息给 {user_id}")
+                    else:
+                        new_timed.append(item)
+                user_schedules["timed"] = new_timed
 
-            # 每日消息
-            for item in user_schedules.get("daily", []):
-                if item["time"] == current_time:
-                    topic = item.get("topic", "")
-                    system = f"""当前时间: {get_time_str()}
+                # 每日消息
+                for item in user_schedules.get("daily", []):
+                    if item["time"] == current_time:
+                        topic = item.get("topic", "")
+                        system = f"""当前时间: {get_time_str()}
 
 记忆：{memories if memories else "无"}
 
@@ -937,24 +931,25 @@ def cron_job():
 - 直接发消息给用户
 - 如果觉得现在不合适，回复：[不发]"""
 
-                    messages = [{"role": "system", "content": system}]
-                    history = trim_history_for_api(user.get("history", [])[-10:], current_api)
-                    messages.extend(history)
+                        messages = [{"role": "system", "content": system}]
+                        history = trim_history_for_api(user.get("history", [])[-10:], current_api)
+                        messages.extend(history)
 
-                    reply = call_ai(messages, current_api)
+                        reply = call_ai(messages, current_api)
 
-                    if "[不发]" not in reply:
-                        visible, _, _ = parse_hidden_commands(reply, user_id)
-                        if visible.strip():
-                            send_slack(channel, visible)
-                            log_message(channel, "assistant", f"[每日] {visible}", model="AI")
+                        if "[不发]" not in reply:
+                            visible, _, _ = parse_hidden_commands(reply, user_id)
+                            if visible.strip():
+                                send_slack(channel, visible)
+                                log_message(channel, "assistant", f"[每日] {visible}", model="AI")
+                                print(f"[Scheduler] 发送每日消息给 {user_id}")
 
-            # 特殊日期 (0:00)
-            if current_time == "00:00":
-                special_dates = user_schedules.get("special_dates", {})
-                if current_date in special_dates:
-                    desc = special_dates[current_date]
-                    system = f"""当前时间: {get_time_str()}
+                # 特殊日期 (0:00)
+                if current_time == "00:00":
+                    special_dates = user_schedules.get("special_dates", {})
+                    if current_date in special_dates:
+                        desc = special_dates[current_date]
+                        system = f"""当前时间: {get_time_str()}
 
 记忆：{memories if memories else "无"}
 
@@ -964,24 +959,25 @@ def cron_job():
 - 发一条温馨的消息
 - 如果觉得不合适，回复：[不发]"""
 
-                    messages = [{"role": "system", "content": system}]
+                        messages = [{"role": "system", "content": system}]
 
-                    reply = call_ai(messages, current_api)
+                        reply = call_ai(messages, current_api)
 
-                    if "[不发]" not in reply:
-                        visible, _, _ = parse_hidden_commands(reply, user_id)
-                        if visible.strip():
-                            send_slack(channel, visible)
-                            log_message(channel, "assistant", f"[特殊] {visible}", model="AI")
+                        if "[不发]" not in reply:
+                            visible, _, _ = parse_hidden_commands(reply, user_id)
+                            if visible.strip():
+                                send_slack(channel, visible)
+                                log_message(channel, "assistant", f"[特殊] {visible}", model="AI")
+                                print(f"[Scheduler] 发送特殊日期消息给 {user_id}")
 
-            # 不活跃检查（4-6小时随机主动发消息）
-            if now.minute in [0, 30] and 7 <= hour < 23:
-                last_active = user.get("last_active", 0)
-                inactive_hours = (now.timestamp() - last_active) / 3600
-                trigger_hours = random.uniform(4, 6)
+                # 不活跃检查（4-6小时随机主动发消息）
+                if now.minute in [0, 30] and 7 <= hour < 23:
+                    last_active = user.get("last_active", 0)
+                    inactive_hours = (now.timestamp() - last_active) / 3600
+                    trigger_hours = random.uniform(4, 6)
 
-                if inactive_hours >= trigger_hours:
-                    system = f"""当前时间: {get_time_str()}
+                    if inactive_hours >= trigger_hours:
+                        system = f"""当前时间: {get_time_str()}
 
 记忆：{memories if memories else "无"}
 
@@ -993,34 +989,51 @@ def cron_job():
 
 考虑：时间、最近聊了什么、有什么想说的"""
 
-                    messages = [{"role": "system", "content": system}]
-                    history = trim_history_for_api(user.get("history", [])[-10:], current_api)
-                    messages.extend(history)
-                    messages.append({"role": "user", "content": "（系统：要主动说点什么吗？）"})
+                        messages = [{"role": "system", "content": system}]
+                        history = trim_history_for_api(user.get("history", [])[-10:], current_api)
+                        messages.extend(history)
+                        messages.append({"role": "user", "content": "（系统：要主动说点什么吗？）"})
 
-                    reply = call_ai(messages, current_api)
+                        reply = call_ai(messages, current_api)
 
-                    if "[不发]" not in reply:
-                        visible, _, _ = parse_hidden_commands(reply, user_id)
-                        if visible.strip():
-                            send_slack(channel, visible)
-                            log_message(channel, "assistant", f"[主动] {visible}", model="AI")
-                            user["last_active"] = now.timestamp()
+                        if "[不发]" not in reply:
+                            visible, _, _ = parse_hidden_commands(reply, user_id)
+                            if visible.strip():
+                                send_slack(channel, visible)
+                                log_message(channel, "assistant", f"[主动] {visible}", model="AI")
+                                user["last_active"] = now.timestamp()
+                                print(f"[Scheduler] 主动发消息给 {user_id}")
 
-            schedules[user_id] = user_schedules
+                schedules[user_id] = user_schedules
 
-        save_schedules(schedules)
-        save_user_data(all_data)
+            save_schedules(schedules)
+            save_user_data(all_data)
 
-        return jsonify({"ok": True, "time": current_time})
+        except Exception as e:
+            print(f"[Scheduler] 出错: {str(e)}")
 
-    except Exception as e:
-        print(f"Cron 出错: {str(e)}")
-        return jsonify({"ok": False, "error": str(e)})
+        # 每分钟检查一次
+        time.sleep(60)
+
+# ========== 备用 Cron 端点 ==========
+
+@app.route("/cron", methods=["GET", "POST"])
+def cron_job():
+    return jsonify({"ok": True, "message": "Using background thread scheduler"})
+
+# ========== 首页 ==========
 
 @app.route("/")
 def home():
     return "Bot is running! 🤖"
+
+# ========== 启动后台线程 ==========
+
+scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+scheduler_thread.start()
+print("[Startup] 后台定时任务线程已启动")
+
+# ========== 启动 ==========
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
