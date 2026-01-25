@@ -19,7 +19,6 @@ JSONBIN_SCHEDULES = os.environ.get("JSONBIN_SCHEDULES")
 JSONBIN_MEMORIES = os.environ.get("JSONBIN_MEMORIES")
 JSONBIN_CHAT_LOGS = os.environ.get("JSONBIN_CHAT_LOGS")
 
-# 每个 API 的 token 上限
 API_TOKEN_LIMITS = {
     "第三方sonnet": 110000,
     "sonnet": 190000,
@@ -60,7 +59,6 @@ CN_TIMEZONE = timezone(timedelta(hours=8))
 processed_events = set()
 pending_messages = {}
 pending_timers = {}
-pending_confirmations = {}
 
 # ========== JSONBin 工具函数 ==========
 
@@ -373,7 +371,24 @@ Slack 格式规则：
 - 记录特殊日期并非硬性规定，只要你认为需要记录的日期都可以是特殊日期。特殊日期最好也一并记入长期记忆"""
 
     if mode == "short":
-        base += "\n\n短句模式：用 ||| 分隔多条消息"
+        base += """
+
+===== 短句模式（重要！必须遵守）=====
+
+你现在是短句模式，必须：
+1. 每条消息都要简短（1-2句话）
+2. 用 ||| 分隔多条消息
+3. 像真人聊天一样，一条一条发
+
+示例：
+用户：今天天气怎么样？
+你：今天天气不错哦|||阳光明媚的|||适合出去走走~
+
+用户：帮我写个代码
+你：好的|||你要写什么呢？|||告诉我需求~
+
+禁止：一大段话不分隔
+必须：用 ||| 分成多条短消息"""
 
     return base
 
@@ -501,53 +516,9 @@ def download_image(url):
         print(f"下载失败: {e}")
     return None
 
-# ========== 处理确认 ==========
-
-def handle_confirmation(user_id, channel, text):
-    if user_id not in pending_confirmations:
-        return False
-    
-    confirmation = pending_confirmations[user_id]
-    
-    if text.lower() in ["yes", "是", "确认", "确定"]:
-        action = confirmation.get("action")
-        
-        if action == "reset":
-            all_data = load_user_data()
-            if user_id in all_data:
-                all_data[user_id]["history"] = []
-                save_user_data(all_data)
-            
-            schedules = load_schedules()
-            if user_id in schedules:
-                schedules[user_id] = {"timed": [], "daily": [], "special_dates": {}}
-                save_schedules(schedules)
-            
-            clear_chat_logs(channel)
-            log_message(channel, None, None, is_reset=True)
-            
-            send_slack(channel, "✅ 已重置！对话历史、聊天记录、定时任务已清空（记忆保留）")
-        
-        elif action == "clear_memory":
-            clear_memories(user_id)
-            send_slack(channel, "✅ 记忆已清空！")
-        
-        del pending_confirmations[user_id]
-        return True
-    
-    elif text.lower() in ["no", "否", "取消"]:
-        del pending_confirmations[user_id]
-        send_slack(channel, "❌ 已取消")
-        return True
-    
-    return False
-
 # ========== 处理消息 ==========
 
 def process_message(user_id, channel, text, images=None):
-    if handle_confirmation(user_id, channel, text):
-        return
-    
     all_data = load_user_data()
     user = all_data.get(user_id, {
         "history": [],
@@ -747,20 +718,51 @@ def commands():
     cmd = request.form.get("command")
     user_id = request.form.get("user_id")
     channel = request.form.get("channel_id")
-    text = request.form.get("text", "").strip()
+    text = request.form.get("text", "").strip().lower()
 
     all_data = load_user_data()
     schedules = load_schedules()
 
     if cmd == "/reset":
-        pending_confirmations[user_id] = {
-            "action": "reset",
-            "channel": channel
-        }
-        return jsonify({
-            "response_type": "in_channel",
-            "text": "⚠️ *确定要重置吗？*\n\n将清空：对话历史、聊天记录、定时任务\n保留：记忆\n\n📝 现在可以去 JSONBin 备份聊天记录\n\n回复 *yes* 确认，回复 *no* 取消"
-        })
+        if text == "yes":
+            # 清空 user_data
+            if user_id in all_data:
+                # 保留 channel 信息以便定时任务
+                saved_channel = all_data[user_id].get("channel")
+                all_data[user_id] = {
+                    "history": [],
+                    "api": DEFAULT_API,
+                    "mode": "long",
+                    "points_used": 0,
+                    "channel": saved_channel
+                }
+                save_user_data(all_data)
+            
+            # 清空 schedules
+            if user_id in schedules:
+                schedules[user_id] = {"timed": [], "daily": [], "special_dates": {}}
+                save_schedules(schedules)
+            
+            # 清空 chat_logs
+            clear_chat_logs(channel)
+            log_message(channel, None, None, is_reset=True)
+            
+            return jsonify({
+                "response_type": "in_channel",
+                "text": "✅ 已重置！对话历史、用户数据、聊天记录、定时任务已清空（记忆保留）"
+            })
+        
+        elif text == "no":
+            return jsonify({
+                "response_type": "ephemeral",
+                "text": "❌ 已取消重置"
+            })
+        
+        else:
+            return jsonify({
+                "response_type": "ephemeral",
+                "text": "⚠️ *确定要重置吗？*\n\n将清空：对话历史、用户数据、聊天记录、定时任务\n保留：记忆\n\n📝 现在可以去 JSONBin 备份\n\n确认请输入：`/reset yes`\n取消请输入：`/reset no`"
+            })
 
     if cmd == "/memory":
         if not text:
@@ -772,14 +774,17 @@ def commands():
                 return jsonify({"response_type": "ephemeral", "text": "📝 暂无记忆"})
 
         if text == "clear":
-            pending_confirmations[user_id] = {
-                "action": "clear_memory",
-                "channel": channel
-            }
             return jsonify({
-                "response_type": "in_channel",
-                "text": "⚠️ *确定要清空所有记忆吗？*\n\n📝 现在可以去 JSONBin 备份记忆\n\n回复 *yes* 确认，回复 *no* 取消"
+                "response_type": "ephemeral",
+                "text": "⚠️ *确定要清空所有记忆吗？*\n\n📝 现在可以去 JSONBin 备份\n\n确认请输入：`/memory clear yes`\n取消请输入：`/memory clear no`"
             })
+        
+        if text == "clear yes":
+            clear_memories(user_id)
+            return jsonify({"response_type": "ephemeral", "text": "✅ 记忆已清空！"})
+        
+        if text == "clear no":
+            return jsonify({"response_type": "ephemeral", "text": "❌ 已取消"})
 
         if text.startswith("delete "):
             try:
@@ -854,7 +859,6 @@ def commands():
 # ========== 后台定时任务线程 ==========
 
 def run_scheduler():
-    """后台线程：每分钟检查定时任务"""
     while True:
         try:
             now = get_cn_time()
@@ -1012,7 +1016,6 @@ def run_scheduler():
         except Exception as e:
             print(f"[Scheduler] 出错: {str(e)}")
 
-        # 每分钟检查一次
         time.sleep(60)
 
 # ========== 备用 Cron 端点 ==========
