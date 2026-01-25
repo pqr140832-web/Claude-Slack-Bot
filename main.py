@@ -59,6 +59,7 @@ CN_TIMEZONE = timezone(timedelta(hours=8))
 processed_events = set()
 pending_messages = {}
 pending_timers = {}
+pending_confirmations = {}  # 等待确认的操作
 
 # ========== JSONBin 工具函数 ==========
 
@@ -520,9 +521,71 @@ def download_image(url):
         print(f"下载失败: {e}")
     return None
 
+# ========== 处理确认消息 ==========
+
+def handle_confirmation(user_id, channel, text):
+    """处理 yes/no 确认，返回 True 表示已处理"""
+    if user_id not in pending_confirmations:
+        return False
+    
+    text_lower = text.lower().strip()
+    
+    if text_lower in ["yes", "是", "确认", "确定", "y"]:
+        confirmation = pending_confirmations[user_id]
+        action = confirmation.get("action")
+        
+        def do_action():
+            try:
+                if action == "reset":
+                    data = load_user_data()
+                    if user_id in data:
+                        saved_channel = data[user_id].get("channel")
+                        data[user_id] = {
+                            "history": [],
+                            "api": DEFAULT_API,
+                            "mode": "long",
+                            "points_used": 0,
+                            "channel": saved_channel
+                        }
+                        save_user_data(data)
+                    
+                    scheds = load_schedules()
+                    if user_id in scheds:
+                        scheds[user_id] = {"timed": [], "daily": [], "special_dates": {}}
+                        save_schedules(scheds)
+                    
+                    clear_chat_logs(channel)
+                    log_message(channel, None, None, is_reset=True)
+                    
+                    send_slack(channel, "✅ 已重置！对话历史、用户数据、聊天记录、定时任务已清空（记忆保留）")
+                
+                elif action == "clear_memory":
+                    clear_memories(user_id)
+                    send_slack(channel, "✅ 记忆已清空！")
+                
+                print(f"[Confirmation] 用户 {user_id} 执行 {action} 完成")
+            except Exception as e:
+                print(f"[Error] 执行 {action} 失败: {str(e)}")
+                send_slack(channel, f"❌ 操作失败：{str(e)}")
+        
+        threading.Thread(target=do_action).start()
+        del pending_confirmations[user_id]
+        return True
+    
+    elif text_lower in ["no", "否", "取消", "n"]:
+        del pending_confirmations[user_id]
+        send_slack(channel, "❌ 已取消")
+        return True
+    
+    return False
+
 # ========== 处理消息 ==========
 
 def process_message(user_id, channel, text, images=None):
+    # 先检查是否是确认消息
+    if handle_confirmation(user_id, channel, text):
+        return
+    
     all_data = load_user_data()
     user = all_data.get(user_id, {
         "history": [],
@@ -603,6 +666,10 @@ def delayed_process(user_id, channel):
     if user_id in pending_messages and pending_messages[user_id]:
         combined = "\n".join(pending_messages[user_id])
         pending_messages[user_id] = []
+
+        # 检查是否是确认消息
+        if handle_confirmation(user_id, channel, combined):
+            return
 
         all_data = load_user_data()
         user = all_data.get(user_id, {
@@ -685,22 +752,7 @@ def events():
         channel = event.get("channel")
         text = re.sub(r'<@\w+>', '', event.get("text", "")).strip()
 
-        # 忽略斜杠命令（避免重复处理）
-        if text.startswith("/"):
-            return jsonify({"ok": True})
-        
-        # 忽略空消息
-        if not text:
-            images = []
-            files = event.get("files", [])
-            for f in files:
-                if f.get("mimetype", "").startswith("image/"):
-                    url = f.get("url_private")
-                    if url:
-                        images.append(url)
-            if not images:
-                return jsonify({"ok": True})
-
+        # 忽略空消息（除非有图片）
         images = []
         files = event.get("files", [])
         for f in files:
@@ -708,6 +760,9 @@ def events():
                 url = f.get("url_private")
                 if url:
                     images.append(url)
+
+        if not text and not images:
+            return jsonify({"ok": True})
 
         print(f"用户 {user_id}: {text}, 图片: {len(images)}")
 
@@ -746,51 +801,15 @@ def commands():
     schedules = load_schedules()
 
     if cmd == "/reset":
-        if text == "yes":
-            def do_reset():
-                try:
-                    data = load_user_data()
-                    if user_id in data:
-                        saved_channel = data[user_id].get("channel")
-                        data[user_id] = {
-                            "history": [],
-                            "api": DEFAULT_API,
-                            "mode": "long",
-                            "points_used": 0,
-                            "channel": saved_channel
-                        }
-                        save_user_data(data)
-                    
-                    scheds = load_schedules()
-                    if user_id in scheds:
-                        scheds[user_id] = {"timed": [], "daily": [], "special_dates": {}}
-                        save_schedules(scheds)
-                    
-                    clear_chat_logs(channel)
-                    log_message(channel, None, None, is_reset=True)
-                    
-                    print(f"[Reset] 用户 {user_id} 重置完成")
-                except Exception as e:
-                    print(f"[Error] 重置失败: {str(e)}")
-            
-            threading.Thread(target=do_reset).start()
-            
-            return jsonify({
-                "response_type": "in_channel",
-                "text": "✅ 正在重置...对话历史、用户数据、聊天记录、定时任务将被清空（记忆保留）"
-            })
-        
-        elif text == "no":
-            return jsonify({
-                "response_type": "ephemeral",
-                "text": "❌ 已取消重置"
-            })
-        
-        else:
-            return jsonify({
-                "response_type": "ephemeral",
-                "text": "⚠️ *确定要重置吗？*\n\n将清空：对话历史、用户数据、聊天记录、定时任务\n保留：记忆\n\n📝 现在可以去 JSONBin 备份\n\n确认请输入：`/reset yes`\n取消请输入：`/reset no`"
-            })
+        # 设置等待确认
+        pending_confirmations[user_id] = {
+            "action": "reset",
+            "channel": channel
+        }
+        return jsonify({
+            "response_type": "in_channel",
+            "text": "⚠️ *确定要重置吗？*\n\n将清空：对话历史、用户数据、聊天记录、定时任务\n保留：记忆\n\n📝 现在可以去 JSONBin 备份\n\n回复 *yes* 确认，回复 *no* 取消"
+        })
 
     if cmd == "/memory":
         if not text:
@@ -802,24 +821,14 @@ def commands():
                 return jsonify({"response_type": "ephemeral", "text": "📝 暂无记忆"})
 
         if text == "clear":
+            pending_confirmations[user_id] = {
+                "action": "clear_memory",
+                "channel": channel
+            }
             return jsonify({
-                "response_type": "ephemeral",
-                "text": "⚠️ *确定要清空所有记忆吗？*\n\n📝 现在可以去 JSONBin 备份\n\n确认请输入：`/memory clear yes`\n取消请输入：`/memory clear no`"
+                "response_type": "in_channel",
+                "text": "⚠️ *确定要清空所有记忆吗？*\n\n📝 现在可以去 JSONBin 备份\n\n回复 *yes* 确认，回复 *no* 取消"
             })
-        
-        if text == "clear yes":
-            def do_clear_memory():
-                try:
-                    clear_memories(user_id)
-                    print(f"[Memory] 用户 {user_id} 记忆已清空")
-                except Exception as e:
-                    print(f"[Error] 清空记忆失败: {str(e)}")
-            
-            threading.Thread(target=do_clear_memory).start()
-            return jsonify({"response_type": "ephemeral", "text": "✅ 正在清空记忆..."})
-        
-        if text == "clear no":
-            return jsonify({"response_type": "ephemeral", "text": "❌ 已取消"})
 
         if text.startswith("delete "):
             try:
