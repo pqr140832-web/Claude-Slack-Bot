@@ -731,38 +731,38 @@ def commands():
 
     if cmd == "/reset":
         if text == "yes":
-            try:
-                # 清空 user_data
-                if user_id in all_data:
-                    saved_channel = all_data[user_id].get("channel")
-                    all_data[user_id] = {
-                        "history": [],
-                        "api": DEFAULT_API,
-                        "mode": "long",
-                        "points_used": 0,
-                        "channel": saved_channel
-                    }
-                    save_user_data(all_data)
-                
-                # 清空 schedules
-                if user_id in schedules:
-                    schedules[user_id] = {"timed": [], "daily": [], "special_dates": {}}
-                    save_schedules(schedules)
-                
-                # 清空 chat_logs
-                clear_chat_logs(channel)
-                log_message(channel, None, None, is_reset=True)
-                
-                return jsonify({
-                    "response_type": "in_channel",
-                    "text": "✅ 已重置！对话历史、用户数据、聊天记录、定时任务已清空（记忆保留）"
-                })
-            except Exception as e:
-                print(f"[Error] /reset yes 失败: {str(e)}")
-                return jsonify({
-                    "response_type": "ephemeral",
-                    "text": f"❌ 重置失败：{str(e)}"
-                })
+            def do_reset():
+                try:
+                    data = load_user_data()
+                    if user_id in data:
+                        saved_channel = data[user_id].get("channel")
+                        data[user_id] = {
+                            "history": [],
+                            "api": DEFAULT_API,
+                            "mode": "long",
+                            "points_used": 0,
+                            "channel": saved_channel
+                        }
+                        save_user_data(data)
+                    
+                    scheds = load_schedules()
+                    if user_id in scheds:
+                        scheds[user_id] = {"timed": [], "daily": [], "special_dates": {}}
+                        save_schedules(scheds)
+                    
+                    clear_chat_logs(channel)
+                    log_message(channel, None, None, is_reset=True)
+                    
+                    print(f"[Reset] 用户 {user_id} 重置完成")
+                except Exception as e:
+                    print(f"[Error] 重置失败: {str(e)}")
+            
+            threading.Thread(target=do_reset).start()
+            
+            return jsonify({
+                "response_type": "in_channel",
+                "text": "✅ 正在重置...对话历史、用户数据、聊天记录、定时任务将被清空（记忆保留）"
+            })
         
         elif text == "no":
             return jsonify({
@@ -792,11 +792,15 @@ def commands():
             })
         
         if text == "clear yes":
-            try:
-                clear_memories(user_id)
-                return jsonify({"response_type": "ephemeral", "text": "✅ 记忆已清空！"})
-            except Exception as e:
-                return jsonify({"response_type": "ephemeral", "text": f"❌ 清空失败：{str(e)}"})
+            def do_clear_memory():
+                try:
+                    clear_memories(user_id)
+                    print(f"[Memory] 用户 {user_id} 记忆已清空")
+                except Exception as e:
+                    print(f"[Error] 清空记忆失败: {str(e)}")
+            
+            threading.Thread(target=do_clear_memory).start()
+            return jsonify({"response_type": "ephemeral", "text": "✅ 正在清空记忆..."})
         
         if text == "clear no":
             return jsonify({"response_type": "ephemeral", "text": "❌ 已取消"})
@@ -836,7 +840,6 @@ def commands():
                 "text": f"当前: {current}\n剩余积分: {points_str}\n\n可用:\n" + "\n".join(models_info)
             })
 
-        # 注意：model 名字可能有大写，不要 lower()
         original_text = request.form.get("text", "").strip()
         if original_text in APIS:
             if user_id not in all_data:
@@ -885,7 +888,6 @@ def run_scheduler():
 
             print(f"[Scheduler] 检查时间: {current_time}")
 
-            # 每天 0:00 重置积分
             if current_time == "00:00":
                 all_data = load_user_data()
                 for uid in all_data:
@@ -905,7 +907,6 @@ def run_scheduler():
                 current_api = user.get("api", DEFAULT_API)
                 memories = format_memories(user_id, show_numbers=False)
 
-                # 定时消息
                 timed = user_schedules.get("timed", [])
                 new_timed = []
                 for item in timed:
@@ -938,7 +939,6 @@ def run_scheduler():
                         new_timed.append(item)
                 user_schedules["timed"] = new_timed
 
-                # 每日消息
                 for item in user_schedules.get("daily", []):
                     if item["time"] == current_time:
                         topic = item.get("topic", "")
@@ -965,7 +965,6 @@ def run_scheduler():
                                 log_message(channel, "assistant", f"[每日] {visible}", model="AI")
                                 print(f"[Scheduler] 发送每日消息给 {user_id}")
 
-                # 特殊日期 (0:00)
                 if current_time == "00:00":
                     special_dates = user_schedules.get("special_dates", {})
                     if current_date in special_dates:
@@ -991,7 +990,6 @@ def run_scheduler():
                                 log_message(channel, "assistant", f"[特殊] {visible}", model="AI")
                                 print(f"[Scheduler] 发送特殊日期消息给 {user_id}")
 
-                # 不活跃检查（4-6小时随机主动发消息）
                 if now.minute in [0, 30] and 7 <= hour < 23:
                     last_active = user.get("last_active", 0)
                     inactive_hours = (now.timestamp() - last_active) / 3600
