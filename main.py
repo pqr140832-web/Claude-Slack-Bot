@@ -13,7 +13,18 @@ app = Flask(__name__)
 
 # ========== 配置 ==========
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
-SELF_URL = os.environ.get("SELF_URL", "")
+JSONBIN_API_KEY = os.environ.get("JSONBIN_API_KEY")
+JSONBIN_USER_DATA = os.environ.get("JSONBIN_USER_DATA")
+JSONBIN_SCHEDULES = os.environ.get("JSONBIN_SCHEDULES")
+JSONBIN_MEMORIES = os.environ.get("JSONBIN_MEMORIES")
+JSONBIN_CHAT_LOGS = os.environ.get("JSONBIN_CHAT_LOGS")
+
+# 每个 API 的 token 上限（留一半给回复）
+API_TOKEN_LIMITS = {
+    "第三方sonnet": 100000,
+    "sonnet": 100000,
+    "opus": 100000
+}
 
 APIS = {
     "第三方sonnet": {
@@ -44,23 +55,46 @@ UNLIMITED_USERS = ["sakuragochyan"]
 POINTS_LIMIT = 20
 MEMORY_LIMIT = 2000
 
-DATA_DIR = "chat_logs"
-USER_DATA_FILE = "user_data.json"
-SCHEDULE_FILE = "schedules.json"
-MEMORY_DIR = "memories"
-
 CN_TIMEZONE = timezone(timedelta(hours=8))
 
 processed_events = set()
 pending_messages = {}
 pending_timers = {}
+pending_confirmations = {}
 
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
-if not os.path.exists(MEMORY_DIR):
-    os.makedirs(MEMORY_DIR)
+# ========== JSONBin 工具函数 ==========
 
-# ========== 工具函数 ==========
+def jsonbin_save(bin_id, data):
+    try:
+        requests.put(
+            f"https://api.jsonbin.io/v3/b/{bin_id}",
+            headers={
+                "X-Master-Key": JSONBIN_API_KEY,
+                "Content-Type": "application/json"
+            },
+            json=data,
+            timeout=30
+        )
+    except Exception as e:
+        print(f"JSONBin 保存失败: {e}")
+
+def jsonbin_load(bin_id, default=None):
+    try:
+        resp = requests.get(
+            f"https://api.jsonbin.io/v3/b/{bin_id}/latest",
+            headers={"X-Master-Key": JSONBIN_API_KEY},
+            timeout=30
+        )
+        if resp.status_code == 200:
+            record = resp.json().get("record", default or {})
+            if "init" in record:
+                del record["init"]
+            return record
+    except Exception as e:
+        print(f"JSONBin 读取失败: {e}")
+    return default or {}
+
+# ========== 时间工具 ==========
 
 def get_cn_time():
     return datetime.now(CN_TIMEZONE)
@@ -70,42 +104,76 @@ def get_time_str():
     now = get_cn_time()
     return now.strftime("%Y年%m月%d日 %H:%M:%S 星期") + weekdays[now.weekday()]
 
+# ========== 数据持久化 ==========
+
 def load_user_data():
-    if os.path.exists(USER_DATA_FILE):
-        with open(USER_DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    return jsonbin_load(JSONBIN_USER_DATA, {})
 
 def save_user_data(data):
-    with open(USER_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    jsonbin_save(JSONBIN_USER_DATA, data)
 
 def load_schedules():
-    if os.path.exists(SCHEDULE_FILE):
-        with open(SCHEDULE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    return jsonbin_load(JSONBIN_SCHEDULES, {})
 
 def save_schedules(data):
-    with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    jsonbin_save(JSONBIN_SCHEDULES, data)
+
+# ========== 聊天记录 ==========
+
+def load_chat_logs():
+    return jsonbin_load(JSONBIN_CHAT_LOGS, {})
+
+def save_chat_logs(data):
+    jsonbin_save(JSONBIN_CHAT_LOGS, data)
+
+def log_message(channel, role, content, username=None, model=None, is_reset=False, hidden=False):
+    logs = load_chat_logs()
+    if channel not in logs:
+        logs[channel] = []
+    
+    timestamp = get_time_str()
+    
+    if is_reset:
+        logs[channel].append({
+            "type": "reset",
+            "time": timestamp
+        })
+    else:
+        entry = {
+            "time": timestamp,
+            "role": role,
+            "content": content,
+            "hidden": hidden
+        }
+        if role == "user":
+            entry["username"] = username or "未知"
+        else:
+            entry["model"] = model or "未知"
+        logs[channel].append(entry)
+    
+    save_chat_logs(logs)
+
+def clear_chat_logs(channel):
+    logs = load_chat_logs()
+    logs[channel] = []
+    save_chat_logs(logs)
 
 # ========== 记忆系统 ==========
 
-def get_memory_path(user_id):
-    return os.path.join(MEMORY_DIR, f"{user_id}.json")
+def load_all_memories():
+    return jsonbin_load(JSONBIN_MEMORIES, {})
+
+def save_all_memories(data):
+    jsonbin_save(JSONBIN_MEMORIES, data)
 
 def load_memories(user_id):
-    path = get_memory_path(user_id)
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    all_mem = load_all_memories()
+    return all_mem.get(user_id, [])
 
 def save_memories(user_id, memories):
-    path = get_memory_path(user_id)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(memories, f, ensure_ascii=False, indent=2)
+    all_mem = load_all_memories()
+    all_mem[user_id] = memories
+    save_all_memories(all_mem)
 
 def add_memory(user_id, content):
     memories = load_memories(user_id)
@@ -174,28 +242,29 @@ def get_all_memories_for_channel(channel):
 def is_dm_channel(channel):
     return channel.startswith("D")
 
+# ========== 历史记录管理 ==========
+
+def estimate_tokens(text):
+    """估算 token 数（中文约 2 字符/token，英文约 4 字符/token）"""
+    if not text:
+        return 0
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', str(text)))
+    other_chars = len(str(text)) - chinese_chars
+    return int(chinese_chars / 1.5 + other_chars / 4)
+
+def trim_history_for_api(history, api_name):
+    """根据 API 的 token 上限裁剪历史"""
+    max_tokens = API_TOKEN_LIMITS.get(api_name, 100000)
+    
+    total_tokens = sum(estimate_tokens(m.get("content", "")) for m in history)
+    
+    while total_tokens > max_tokens and len(history) > 2:
+        removed = history.pop(0)
+        total_tokens -= estimate_tokens(removed.get("content", ""))
+    
+    return history
+
 # ========== 其他工具 ==========
-
-def get_log_path(channel):
-    return os.path.join(DATA_DIR, f"{channel}.txt")
-
-def log_message(channel, role, content, username=None, model=None, is_reset=False, hidden=False):
-    path = get_log_path(channel)
-    timestamp = get_time_str()
-
-    with open(path, "a", encoding="utf-8") as f:
-        if is_reset:
-            f.write(f"\n{'='*50}\n")
-            f.write(f"[{timestamp}] ===== 对话已重置 =====\n")
-            f.write(f"{'='*50}\n\n")
-        else:
-            prefix = "[隐藏] " if hidden else ""
-            f.write(f"[{timestamp}] {prefix}\n")
-            if role == "user":
-                f.write(f"用户名称：{username or '未知'}\n")
-            else:
-                f.write(f"模型名称：{model or '未知'}\n")
-            f.write(f"{content}\n\n")
 
 def get_username(user_id):
     try:
@@ -301,7 +370,7 @@ Slack 格式规则：
 
 *隐藏规则*：
 - 设定的隐藏内容你下次能看到
-- 用户要求设提醒时，说"好了"就行"""
+- 用户要求设提醒时，自然地确认并告知设置的时间"""
 
     if mode == "short":
         base += "\n\n短句模式：用 ||| 分隔多条消息"
@@ -436,9 +505,55 @@ def download_image(url):
         print(f"下载失败: {e}")
     return None
 
+# ========== 处理确认 ==========
+
+def handle_confirmation(user_id, channel, text):
+    """处理用户的确认回复"""
+    if user_id not in pending_confirmations:
+        return False
+    
+    confirmation = pending_confirmations[user_id]
+    
+    if text.lower() in ["yes", "是", "确认", "确定"]:
+        action = confirmation.get("action")
+        
+        if action == "reset":
+            all_data = load_user_data()
+            if user_id in all_data:
+                all_data[user_id]["history"] = []
+                save_user_data(all_data)
+            
+            schedules = load_schedules()
+            if user_id in schedules:
+                schedules[user_id] = {"timed": [], "daily": [], "special_dates": {}}
+                save_schedules(schedules)
+            
+            clear_chat_logs(channel)
+            log_message(channel, None, None, is_reset=True)
+            
+            send_slack(channel, "✅ 已重置！对话历史、聊天记录、定时任务已清空（记忆保留）")
+        
+        elif action == "clear_memory":
+            clear_memories(user_id)
+            send_slack(channel, "✅ 记忆已清空！")
+        
+        del pending_confirmations[user_id]
+        return True
+    
+    elif text.lower() in ["no", "否", "取消"]:
+        del pending_confirmations[user_id]
+        send_slack(channel, "❌ 已取消")
+        return True
+    
+    return False
+
 # ========== 处理消息 ==========
 
 def process_message(user_id, channel, text, images=None):
+    # 检查是否是确认回复
+    if handle_confirmation(user_id, channel, text):
+        return
+    
     all_data = load_user_data()
     user = all_data.get(user_id, {
         "history": [],
@@ -464,7 +579,9 @@ def process_message(user_id, channel, text, images=None):
 
     system = get_system_prompt(mode, user_id, channel)
     messages = [{"role": "system", "content": system}]
-    messages.extend(user.get("history", []))
+    
+    history = trim_history_for_api(user.get("history", []).copy(), current_api)
+    messages.extend(history)
 
     has_image = False
     if images and len(images) > 0:
@@ -496,7 +613,6 @@ def process_message(user_id, channel, text, images=None):
 
     user["history"].append({"role": "user", "content": text})
     user["history"].append({"role": "assistant", "content": original_reply})
-    user["history"] = user["history"][-20:]
 
     all_data[user_id] = user
     save_user_data(all_data)
@@ -541,7 +657,9 @@ def delayed_process(user_id, channel):
 
         system = get_system_prompt("short", user_id, channel)
         messages = [{"role": "system", "content": system}]
-        messages.extend(user.get("history", []))
+        
+        history = trim_history_for_api(user.get("history", []).copy(), current_api)
+        messages.extend(history)
         messages.append({"role": "user", "content": combined})
 
         reply = call_ai(messages, current_api)
@@ -552,7 +670,6 @@ def delayed_process(user_id, channel):
 
         user["history"].append({"role": "user", "content": combined})
         user["history"].append({"role": "assistant", "content": original_reply})
-        user["history"] = user["history"][-20:]
         user["last_active"] = get_cn_time().timestamp()
 
         all_data[user_id] = user
@@ -642,14 +759,14 @@ def commands():
     schedules = load_schedules()
 
     if cmd == "/reset":
-        if user_id in all_data:
-            all_data[user_id]["history"] = []
-            save_user_data(all_data)
-        if user_id in schedules:
-            schedules[user_id] = {"timed": [], "daily": [], "special_dates": {}}
-            save_schedules(schedules)
-        log_message(channel, None, None, is_reset=True)
-        return jsonify({"response_type": "ephemeral", "text": "✅ 对话和定时任务已重置（记忆保留）"})
+        pending_confirmations[user_id] = {
+            "action": "reset",
+            "channel": channel
+        }
+        return jsonify({
+            "response_type": "in_channel",
+            "text": "⚠️ *确定要重置吗？*\n\n将清空：对话历史、聊天记录、定时任务\n保留：记忆\n\n📝 现在可以去 JSONBin 备份聊天记录\n\n回复 *yes* 确认，回复 *no* 取消"
+        })
 
     if cmd == "/memory":
         if not text:
@@ -661,8 +778,14 @@ def commands():
                 return jsonify({"response_type": "ephemeral", "text": "📝 暂无记忆"})
 
         if text == "clear":
-            clear_memories(user_id)
-            return jsonify({"response_type": "ephemeral", "text": "✅ 记忆已清空"})
+            pending_confirmations[user_id] = {
+                "action": "clear_memory",
+                "channel": channel
+            }
+            return jsonify({
+                "response_type": "in_channel",
+                "text": "⚠️ *确定要清空所有记忆吗？*\n\n📝 现在可以去 JSONBin 备份记忆\n\n回复 *yes* 确认，回复 *no* 取消"
+            })
 
         if text.startswith("delete "):
             try:
@@ -784,7 +907,8 @@ def cron_job():
 - 如果觉得现在不合适，回复：[不发]"""
 
                     messages = [{"role": "system", "content": system}]
-                    messages.extend(user.get("history", [])[-5:])
+                    history = trim_history_for_api(user.get("history", [])[-10:], current_api)
+                    messages.extend(history)
 
                     reply = call_ai(messages, current_api)
 
@@ -812,7 +936,8 @@ def cron_job():
 - 如果觉得现在不合适，回复：[不发]"""
 
                     messages = [{"role": "system", "content": system}]
-                    messages.extend(user.get("history", [])[-5:])
+                    history = trim_history_for_api(user.get("history", [])[-10:], current_api)
+                    messages.extend(history)
 
                     reply = call_ai(messages, current_api)
 
@@ -847,7 +972,7 @@ def cron_job():
                             send_slack(channel, visible)
                             log_message(channel, "assistant", f"[特殊] {visible}", model="AI")
 
-            # 不活跃检查
+            # 不活跃检查（4-6小时随机主动发消息）
             if now.minute in [0, 30] and 7 <= hour < 23:
                 last_active = user.get("last_active", 0)
                 inactive_hours = (now.timestamp() - last_active) / 3600
@@ -867,7 +992,8 @@ def cron_job():
 考虑：时间、最近聊了什么、有什么想说的"""
 
                     messages = [{"role": "system", "content": system}]
-                    messages.extend(user.get("history", [])[-10:])
+                    history = trim_history_for_api(user.get("history", [])[-10:], current_api)
+                    messages.extend(history)
                     messages.append({"role": "user", "content": "（系统：要主动说点什么吗？）"})
 
                     reply = call_ai(messages, current_api)
