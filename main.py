@@ -351,8 +351,9 @@ Slack 格式规则：
 
 用 [[隐藏]] 包裹的内容不会发给用户，但你能看到：
 
-1. *定时消息*：
-   [[定时|HH:MM|提示内容]]
+1. *定时消息*（必须包含日期！）：
+   [[定时|YYYY-MM-DD|HH:MM|提示内容]]
+   例如：[[定时|2025-01-26|10:30|提醒用户开会]]
 
 2. *每日消息*：
    [[每日|HH:MM|主题]]
@@ -385,7 +386,8 @@ Slack 格式规则：
 - 如果用户明确说了上午、下午、晚上、凌晨，或者使用了24小时制，就不需要询问
 - 如果用户要求设置一个当天已经过去的时间，要告知用户这个时间已经过了，并询问是否改为第二天
 - 关于凌晨说"明天"：0:00到4:00期间用户说"明天"，通常心理上还觉得是"今天"，所以"明天"往往指的是天亮之后的当天而非日历上的第二天。如果不确定可以和用户确认具体日期
-- 最终设置定时消息时使用24小时制格式"""
+- 定时消息格式必须包含完整日期：[[定时|YYYY-MM-DD|HH:MM|内容]]
+- 使用24小时制，日期格式为 YYYY-MM-DD"""
 
     if mode == "short":
         base += """
@@ -417,23 +419,39 @@ def parse_hidden_commands(reply, user_id):
     has_hidden = False
     original_reply = reply
 
-    timed = re.findall(r'\[\[定时\|(\d{1,2}:\d{2})\|(.+?)\]\]', reply)
-    for time_str, hint in timed:
+    # 新格式：[[定时|YYYY-MM-DD|HH:MM|内容]]
+    timed_new = re.findall(r'\[\[定时\|(\d{4}-\d{2}-\d{2})\|(\d{1,2}:\d{2})\|(.+?)\]\]', reply)
+    for date_str, time_str, hint in timed_new:
         # 标准化时间格式：把 9:30 转成 09:30
         parts = time_str.split(":")
         normalized_time = f"{int(parts[0]):02d}:{parts[1]}"
         
         schedules[user_id]["timed"].append({
+            "date": date_str,
             "time": normalized_time,
-            "hint": hint,
-            "date": get_cn_time().strftime("%Y-%m-%d")
+            "hint": hint
+        })
+        reply = reply.replace(f"[[定时|{date_str}|{time_str}|{hint}]]", "")
+        has_hidden = True
+        print(f"[Parse] 添加定时任务: {date_str} {normalized_time} - {hint[:30]}...")
+
+    # 兼容旧格式：[[定时|HH:MM|内容]]（默认当天）
+    timed_old = re.findall(r'\[\[定时\|(\d{1,2}:\d{2})\|(.+?)\]\]', reply)
+    for time_str, hint in timed_old:
+        parts = time_str.split(":")
+        normalized_time = f"{int(parts[0]):02d}:{parts[1]}"
+        
+        schedules[user_id]["timed"].append({
+            "date": get_cn_time().strftime("%Y-%m-%d"),
+            "time": normalized_time,
+            "hint": hint
         })
         reply = reply.replace(f"[[定时|{time_str}|{hint}]]", "")
         has_hidden = True
+        print(f"[Parse] 添加定时任务(旧格式): {get_cn_time().strftime('%Y-%m-%d')} {normalized_time} - {hint[:30]}...")
 
     daily = re.findall(r'\[\[每日\|(\d{1,2}:\d{2})\|(.+?)\]\]', reply)
     for time_str, topic in daily:
-        # 标准化时间格式
         parts = time_str.split(":")
         normalized_time = f"{int(parts[0]):02d}:{parts[1]}"
         
@@ -913,10 +931,10 @@ def run_scheduler():
         try:
             now = get_cn_time()
             current_time = now.strftime("%H:%M")
-            current_date = now.strftime("%m-%d")
+            current_date_md = now.strftime("%m-%d")
             hour = now.hour
 
-            print(f"[Scheduler] 检查时间: {current_time}")
+            print(f"[Scheduler] 检查时间: {now.strftime('%Y-%m-%d %H:%M')}")
 
             if current_time == "00:00":
                 all_data = load_user_data()
@@ -941,26 +959,26 @@ def run_scheduler():
                 timed = user_schedules.get("timed", [])
                 new_timed = []
                 for item in timed:
-                    item_time = item["time"]
-                    item_date = item.get("date")
+                    item_time = item.get("time", "")
+                    item_date = item.get("date", "")
                     
-                    # 标准化时间格式：把 9:30 转成 09:30
-                    if len(item_time.split(":")[0]) == 1:
+                    # 标准化时间格式
+                    if item_time and len(item_time.split(":")[0]) == 1:
                         item_time = "0" + item_time
                     
-                    # 计算目标时间
+                    # 解析目标时间
                     try:
                         target_datetime = datetime.strptime(f"{item_date} {item_time}", "%Y-%m-%d %H:%M")
                         target_datetime = target_datetime.replace(tzinfo=CN_TIMEZONE)
-                    except:
-                        print(f"[Scheduler] 日期格式错误，跳过: {item}")
+                    except Exception as e:
+                        print(f"[Scheduler] 日期解析失败，跳过: {item}, 错误: {e}")
                         new_timed.append(item)
                         continue
                     
-                    # 如果目标时间已经过了（或者就是现在），就触发
+                    # 如果当前时间 >= 目标时间，触发
                     if now >= target_datetime:
                         hint = item.get("hint", "")
-                        print(f"[Scheduler] 触发定时任务: {item_time}, hint: {hint[:50]}...")
+                        print(f"[Scheduler] 触发定时任务: {item_date} {item_time} - {hint[:30]}...")
                         
                         system = get_system_prompt(current_mode, user_id, channel)
                         system += f"""
@@ -991,8 +1009,10 @@ def run_scheduler():
                                 model_name = APIS.get(current_api, {}).get("model", "AI")
                                 log_message(channel, "assistant", f"[定时] {original_reply}", model=model_name, hidden=has_hidden)
                                 user["history"].append({"role": "assistant", "content": original_reply})
-                                print(f"[Scheduler] 发送定时消息给 {user_id}")
-                        # 触发后不加入 new_timed，所以会被删除
+                                print(f"[Scheduler] 已发送定时消息给 {user_id}")
+                        else:
+                            print(f"[Scheduler] AI 选择不发送")
+                        # 不管发没发，都删除这个任务
                     else:
                         # 还没到时间，保留
                         new_timed.append(item)
@@ -1001,8 +1021,14 @@ def run_scheduler():
 
                 # ===== 处理每日任务 =====
                 for item in user_schedules.get("daily", []):
-                    if item["time"] == current_time:
+                    item_time = item.get("time", "")
+                    if len(item_time.split(":")[0]) == 1:
+                        item_time = "0" + item_time
+                    
+                    if item_time == current_time:
                         topic = item.get("topic", "")
+                        print(f"[Scheduler] 触发每日任务: {item_time} - {topic[:30]}...")
+                        
                         system = get_system_prompt(current_mode, user_id, channel)
                         system += f"""
 
@@ -1031,13 +1057,15 @@ def run_scheduler():
                                 model_name = APIS.get(current_api, {}).get("model", "AI")
                                 log_message(channel, "assistant", f"[每日] {original_reply}", model=model_name, hidden=has_hidden)
                                 user["history"].append({"role": "assistant", "content": original_reply})
-                                print(f"[Scheduler] 发送每日消息给 {user_id}")
+                                print(f"[Scheduler] 已发送每日消息给 {user_id}")
 
                 # ===== 处理特殊日期 =====
                 if current_time == "00:00":
                     special_dates = user_schedules.get("special_dates", {})
-                    if current_date in special_dates:
-                        desc = special_dates[current_date]
+                    if current_date_md in special_dates:
+                        desc = special_dates[current_date_md]
+                        print(f"[Scheduler] 触发特殊日期: {current_date_md} - {desc[:30]}...")
+                        
                         system = get_system_prompt(current_mode, user_id, channel)
                         system += f"""
 
@@ -1066,7 +1094,7 @@ def run_scheduler():
                                 model_name = APIS.get(current_api, {}).get("model", "AI")
                                 log_message(channel, "assistant", f"[特殊] {original_reply}", model=model_name, hidden=has_hidden)
                                 user["history"].append({"role": "assistant", "content": original_reply})
-                                print(f"[Scheduler] 发送特殊日期消息给 {user_id}")
+                                print(f"[Scheduler] 已发送特殊日期消息给 {user_id}")
 
                 # ===== 主动关心 =====
                 if now.minute in [0, 30] and 7 <= hour < 23:
@@ -1108,7 +1136,7 @@ def run_scheduler():
                                     log_message(channel, "assistant", f"[主动] {original_reply}", model=model_name, hidden=has_hidden)
                                     user["history"].append({"role": "assistant", "content": original_reply})
                                     user["last_active"] = now.timestamp()
-                                    print(f"[Scheduler] 主动发消息给 {user_id}")
+                                    print(f"[Scheduler] 已主动发消息给 {user_id}")
 
                 schedules[user_id] = user_schedules
 
@@ -1117,6 +1145,8 @@ def run_scheduler():
 
         except Exception as e:
             print(f"[Scheduler] 出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
         time.sleep(60)
 
