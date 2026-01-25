@@ -20,9 +20,9 @@ JSONBIN_MEMORIES = os.environ.get("JSONBIN_MEMORIES")
 JSONBIN_CHAT_LOGS = os.environ.get("JSONBIN_CHAT_LOGS")
 
 API_TOKEN_LIMITS = {
-    "第三方sonnet": 100000,
-    "sonnet": 100000,
-    "opus": 100000
+    "第三方sonnet": 110000,
+    "sonnet": 190000,
+    "opus": 190000
 }
 
 APIS = {
@@ -373,7 +373,9 @@ Slack 格式规则：
 
 *隐藏规则*：
 - 设定的隐藏内容你下次能看到
-- 用户要求设提醒时，自然地确认并告知设置的时间"""
+- 用户要求设提醒时，自然地确认并告知设置的时间
+- 当你认为某一时间会想念用户或只是想在某一时间给用户主动发消息，你也可以设置定时消息、每日消息或特殊日期
+- 记录特殊日期并非硬性规定，只要你认为需要记录的日期都可以是特殊日期。特殊日期最好也一并记入长期记忆"""
 
     if mode == "short":
         base += """
