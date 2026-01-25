@@ -20,9 +20,9 @@ JSONBIN_MEMORIES = os.environ.get("JSONBIN_MEMORIES")
 JSONBIN_CHAT_LOGS = os.environ.get("JSONBIN_CHAT_LOGS")
 
 API_TOKEN_LIMITS = {
-    "第三方sonnet": 100000,
-    "sonnet": 100000,
-    "opus": 100000
+    "第三方sonnet": 110000,
+    "sonnet": 190000,
+    "opus": 190000
 }
 
 APIS = {
@@ -59,7 +59,10 @@ CN_TIMEZONE = timezone(timedelta(hours=8))
 processed_events = set()
 pending_messages = {}
 pending_timers = {}
-pending_clear_logs = {}  # 等待清空聊天记录：{user_id: {"channel": ..., "count": 5}}
+pending_clear_logs = {}
+
+# 记录刚执行过 /reset 的用户，防止消息被当作普通对话
+reset_cooldown = set()
 
 # ========== JSONBin 工具函数 ==========
 
@@ -373,7 +376,9 @@ Slack 格式规则：
 
 *隐藏规则*：
 - 设定的隐藏内容你下次能看到
-- 用户要求设提醒时，自然地确认并告知设置的时间"""
+- 用户要求设提醒时，自然地确认并告知设置的时间
+- 当你认为某一时间会想念用户或只是想在某一时间给用户主动发消息，你也可以设置定时消息、每日消息或特殊日期
+- 记录特殊日期并非硬性规定，只要你认为需要记录的日期都可以是特殊日期。特殊日期最好也一并记入长期记忆"""
 
     if mode == "short":
         base += """
@@ -524,14 +529,12 @@ def download_image(url):
 # ========== 检查并清空聊天记录 ==========
 
 def check_pending_clear(user_id, channel):
-    """检查是否需要清空聊天记录"""
     if user_id in pending_clear_logs:
         pending_clear_logs[user_id]["count"] -= 1
         remaining = pending_clear_logs[user_id]["count"]
         print(f"[PendingClear] 用户 {user_id} 还剩 {remaining} 条消息后清空")
         
         if remaining <= 0:
-            # 清空聊天记录
             clear_chat_logs(channel)
             log_message(channel, None, None, is_reset=True)
             del pending_clear_logs[user_id]
@@ -603,7 +606,6 @@ def process_message(user_id, channel, text, images=None):
     all_data[user_id] = user
     save_user_data(all_data)
 
-    # 检查是否需要清空聊天记录
     check_pending_clear(user_id, channel)
 
     if not visible_reply.strip():
@@ -664,7 +666,6 @@ def delayed_process(user_id, channel):
         all_data[user_id] = user
         save_user_data(all_data)
 
-        # 检查是否需要清空聊天记录
         check_pending_clear(user_id, channel)
 
         if not visible_reply.strip():
@@ -706,7 +707,19 @@ def events():
 
         user_id = event.get("user")
         channel = event.get("channel")
-        text = re.sub(r'<@\w+>', '', event.get("text", "")).strip()
+        raw_text = event.get("text", "")
+        text = re.sub(r'<@\w+>', '', raw_text).strip()
+
+        # 忽略斜杠命令（以 / 开头的消息）
+        if text.startswith("/"):
+            print(f"[Events] 忽略斜杠命令: {text}")
+            return jsonify({"ok": True})
+
+        # 检查是否在 reset 冷却期内
+        if user_id in reset_cooldown:
+            reset_cooldown.discard(user_id)
+            print(f"[Events] 用户 {user_id} 在 reset 冷却期，忽略此消息")
+            return jsonify({"ok": True})
 
         images = []
         files = event.get("files", [])
@@ -756,35 +769,36 @@ def commands():
     schedules = load_schedules()
 
     if cmd == "/reset":
+        # 将用户加入冷却期，防止后续事件触发 AI
+        reset_cooldown.add(user_id)
+        
         def do_reset():
             try:
-                # 清空 user_data
                 data = load_user_data()
                 if user_id in data:
                     saved_channel = data[user_id].get("channel")
+                    saved_api = data[user_id].get("api", DEFAULT_API)
+                    saved_mode = data[user_id].get("mode", "long")
                     data[user_id] = {
                         "history": [],
-                        "api": DEFAULT_API,
-                        "mode": "long",
+                        "api": saved_api,
+                        "mode": saved_mode,
                         "points_used": 0,
                         "channel": saved_channel
                     }
                     save_user_data(data)
                 
-                # 清空 schedules
                 scheds = load_schedules()
                 if user_id in scheds:
                     scheds[user_id] = {"timed": [], "daily": [], "special_dates": {}}
                     save_schedules(scheds)
                 
-                print(f"[Reset] 用户 {user_id} 重置完成（等待5条消息后清空聊天记录）")
+                print(f"[Reset] 用户 {user_id} 重置完成")
             except Exception as e:
                 print(f"[Error] 重置失败: {str(e)}")
         
-        # 后台执行重置
         threading.Thread(target=do_reset).start()
         
-        # 设置等待清空聊天记录
         pending_clear_logs[user_id] = {
             "channel": channel,
             "count": 5
@@ -915,17 +929,17 @@ def run_scheduler():
 
                 user_schedules = schedules.get(user_id, {"timed": [], "daily": [], "special_dates": {}})
                 current_api = user.get("api", DEFAULT_API)
-                memories = format_memories(user_id, show_numbers=False)
+                current_mode = user.get("mode", "long")
 
                 timed = user_schedules.get("timed", [])
                 new_timed = []
                 for item in timed:
                     if item["time"] == current_time and item.get("date") == now.strftime("%Y-%m-%d"):
                         hint = item.get("hint", "")
-                        system = f"""当前时间: {get_time_str()}
+                        system = get_system_prompt(current_mode, user_id, channel)
+                        system += f"""
 
-记忆：{memories if memories else "无"}
-
+===== 定时提醒任务 =====
 你之前设定了一个提醒：{hint}
 现在时间到了。
 
@@ -934,16 +948,23 @@ def run_scheduler():
 - 如果觉得现在不合适，回复：[不发]"""
 
                         messages = [{"role": "system", "content": system}]
-                        history = trim_history_for_api(user.get("history", [])[-10:], current_api)
+                        history = trim_history_for_api(user.get("history", []).copy(), current_api)
                         messages.extend(history)
 
                         reply = call_ai(messages, current_api)
 
                         if "[不发]" not in reply:
-                            visible, _, _ = parse_hidden_commands(reply, user_id)
+                            visible, has_hidden, original_reply = parse_hidden_commands(reply, user_id)
                             if visible.strip():
-                                send_slack(channel, visible)
-                                log_message(channel, "assistant", f"[定时] {visible}", model="AI")
+                                if current_mode == "short" and "|||" in visible:
+                                    parts = visible.split("|||")
+                                    send_multiple_slack(channel, parts)
+                                else:
+                                    send_slack(channel, visible)
+                                
+                                model_name = APIS.get(current_api, {}).get("model", "AI")
+                                log_message(channel, "assistant", f"[定时] {original_reply}", model=model_name, hidden=has_hidden)
+                                user["history"].append({"role": "assistant", "content": original_reply})
                                 print(f"[Scheduler] 发送定时消息给 {user_id}")
                     else:
                         new_timed.append(item)
@@ -952,10 +973,10 @@ def run_scheduler():
                 for item in user_schedules.get("daily", []):
                     if item["time"] == current_time:
                         topic = item.get("topic", "")
-                        system = f"""当前时间: {get_time_str()}
+                        system = get_system_prompt(current_mode, user_id, channel)
+                        system += f"""
 
-记忆：{memories if memories else "无"}
-
+===== 每日消息任务 =====
 你设定了每天这个时候发消息，主题：{topic}
 
 你可以：
@@ -963,26 +984,33 @@ def run_scheduler():
 - 如果觉得现在不合适，回复：[不发]"""
 
                         messages = [{"role": "system", "content": system}]
-                        history = trim_history_for_api(user.get("history", [])[-10:], current_api)
+                        history = trim_history_for_api(user.get("history", []).copy(), current_api)
                         messages.extend(history)
 
                         reply = call_ai(messages, current_api)
 
                         if "[不发]" not in reply:
-                            visible, _, _ = parse_hidden_commands(reply, user_id)
+                            visible, has_hidden, original_reply = parse_hidden_commands(reply, user_id)
                             if visible.strip():
-                                send_slack(channel, visible)
-                                log_message(channel, "assistant", f"[每日] {visible}", model="AI")
+                                if current_mode == "short" and "|||" in visible:
+                                    parts = visible.split("|||")
+                                    send_multiple_slack(channel, parts)
+                                else:
+                                    send_slack(channel, visible)
+                                
+                                model_name = APIS.get(current_api, {}).get("model", "AI")
+                                log_message(channel, "assistant", f"[每日] {original_reply}", model=model_name, hidden=has_hidden)
+                                user["history"].append({"role": "assistant", "content": original_reply})
                                 print(f"[Scheduler] 发送每日消息给 {user_id}")
 
                 if current_time == "00:00":
                     special_dates = user_schedules.get("special_dates", {})
                     if current_date in special_dates:
                         desc = special_dates[current_date]
-                        system = f"""当前时间: {get_time_str()}
+                        system = get_system_prompt(current_mode, user_id, channel)
+                        system += f"""
 
-记忆：{memories if memories else "无"}
-
+===== 特殊日期任务 =====
 今天是用户的特殊日子：{desc}
 
 你可以：
@@ -990,26 +1018,36 @@ def run_scheduler():
 - 如果觉得不合适，回复：[不发]"""
 
                         messages = [{"role": "system", "content": system}]
+                        history = trim_history_for_api(user.get("history", []).copy(), current_api)
+                        messages.extend(history)
 
                         reply = call_ai(messages, current_api)
 
                         if "[不发]" not in reply:
-                            visible, _, _ = parse_hidden_commands(reply, user_id)
+                            visible, has_hidden, original_reply = parse_hidden_commands(reply, user_id)
                             if visible.strip():
-                                send_slack(channel, visible)
-                                log_message(channel, "assistant", f"[特殊] {visible}", model="AI")
+                                if current_mode == "short" and "|||" in visible:
+                                    parts = visible.split("|||")
+                                    send_multiple_slack(channel, parts)
+                                else:
+                                    send_slack(channel, visible)
+                                
+                                model_name = APIS.get(current_api, {}).get("model", "AI")
+                                log_message(channel, "assistant", f"[特殊] {original_reply}", model=model_name, hidden=has_hidden)
+                                user["history"].append({"role": "assistant", "content": original_reply})
                                 print(f"[Scheduler] 发送特殊日期消息给 {user_id}")
 
                 if now.minute in [0, 30] and 7 <= hour < 23:
                     last_active = user.get("last_active", 0)
                     inactive_hours = (now.timestamp() - last_active) / 3600
-                    trigger_hours = random.uniform(4, 6)
 
-                    if inactive_hours >= trigger_hours:
-                        system = f"""当前时间: {get_time_str()}
+                    if inactive_hours >= 4:
+                        trigger_chance = random.random()
+                        if trigger_chance < 0.3:
+                            system = get_system_prompt(current_mode, user_id, channel)
+                            system += f"""
 
-记忆：{memories if memories else "无"}
-
+===== 主动关心任务 =====
 用户已经 {inactive_hours:.1f} 小时没说话了。
 
 你可以：
@@ -1018,20 +1056,27 @@ def run_scheduler():
 
 考虑：时间、最近聊了什么、有什么想说的"""
 
-                        messages = [{"role": "system", "content": system}]
-                        history = trim_history_for_api(user.get("history", [])[-10:], current_api)
-                        messages.extend(history)
-                        messages.append({"role": "user", "content": "（系统：要主动说点什么吗？）"})
+                            messages = [{"role": "system", "content": system}]
+                            history = trim_history_for_api(user.get("history", []).copy(), current_api)
+                            messages.extend(history)
+                            messages.append({"role": "user", "content": "（系统：要主动说点什么吗？）"})
 
-                        reply = call_ai(messages, current_api)
+                            reply = call_ai(messages, current_api)
 
-                        if "[不发]" not in reply:
-                            visible, _, _ = parse_hidden_commands(reply, user_id)
-                            if visible.strip():
-                                send_slack(channel, visible)
-                                log_message(channel, "assistant", f"[主动] {visible}", model="AI")
-                                user["last_active"] = now.timestamp()
-                                print(f"[Scheduler] 主动发消息给 {user_id}")
+                            if "[不发]" not in reply:
+                                visible, has_hidden, original_reply = parse_hidden_commands(reply, user_id)
+                                if visible.strip():
+                                    if current_mode == "short" and "|||" in visible:
+                                        parts = visible.split("|||")
+                                        send_multiple_slack(channel, parts)
+                                    else:
+                                        send_slack(channel, visible)
+                                    
+                                    model_name = APIS.get(current_api, {}).get("model", "AI")
+                                    log_message(channel, "assistant", f"[主动] {original_reply}", model=model_name, hidden=has_hidden)
+                                    user["history"].append({"role": "assistant", "content": original_reply})
+                                    user["last_active"] = now.timestamp()
+                                    print(f"[Scheduler] 主动发消息给 {user_id}")
 
                 schedules[user_id] = user_schedules
 
