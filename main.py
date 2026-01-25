@@ -20,9 +20,9 @@ JSONBIN_MEMORIES = os.environ.get("JSONBIN_MEMORIES")
 JSONBIN_CHAT_LOGS = os.environ.get("JSONBIN_CHAT_LOGS")
 
 API_TOKEN_LIMITS = {
-    "第三方sonnet": 110000,
-    "sonnet": 190000,
-    "opus": 190000
+    "第三方sonnet": 100000,
+    "sonnet": 100000,
+    "opus": 100000
 }
 
 APIS = {
@@ -125,36 +125,42 @@ def save_chat_logs(data):
     jsonbin_save(JSONBIN_CHAT_LOGS, data)
 
 def log_message(channel, role, content, username=None, model=None, is_reset=False, hidden=False):
-    logs = load_chat_logs()
-    if channel not in logs:
-        logs[channel] = []
-    
-    timestamp = get_time_str()
-    
-    if is_reset:
-        logs[channel].append({
-            "type": "reset",
-            "time": timestamp
-        })
-    else:
-        entry = {
-            "time": timestamp,
-            "role": role,
-            "content": content,
-            "hidden": hidden
-        }
-        if role == "user":
-            entry["username"] = username or "未知"
+    try:
+        logs = load_chat_logs()
+        if channel not in logs:
+            logs[channel] = []
+        
+        timestamp = get_time_str()
+        
+        if is_reset:
+            logs[channel].append({
+                "type": "reset",
+                "time": timestamp
+            })
         else:
-            entry["model"] = model or "未知"
-        logs[channel].append(entry)
-    
-    save_chat_logs(logs)
+            entry = {
+                "time": timestamp,
+                "role": role,
+                "content": content,
+                "hidden": hidden
+            }
+            if role == "user":
+                entry["username"] = username or "未知"
+            else:
+                entry["model"] = model or "未知"
+            logs[channel].append(entry)
+        
+        save_chat_logs(logs)
+    except Exception as e:
+        print(f"log_message 出错: {e}")
 
 def clear_chat_logs(channel):
-    logs = load_chat_logs()
-    logs[channel] = []
-    save_chat_logs(logs)
+    try:
+        logs = load_chat_logs()
+        logs[channel] = []
+        save_chat_logs(logs)
+    except Exception as e:
+        print(f"clear_chat_logs 出错: {e}")
 
 # ========== 记忆系统 ==========
 
@@ -366,9 +372,7 @@ Slack 格式规则：
 
 *隐藏规则*：
 - 设定的隐藏内容你下次能看到
-- 用户要求设提醒时，自然地确认并告知设置的时间
-- 当你认为某一时间会想念用户或只是想在某一时间给用户主动发消息，你也可以设置定时消息、每日消息或特殊日期
-- 记录特殊日期并非硬性规定，只要你认为需要记录的日期都可以是特殊日期。特殊日期最好也一并记入长期记忆"""
+- 用户要求设提醒时，自然地确认并告知设置的时间"""
 
     if mode == "short":
         base += """
@@ -720,37 +724,45 @@ def commands():
     channel = request.form.get("channel_id")
     text = request.form.get("text", "").strip().lower()
 
+    print(f"[Debug] 命令: {cmd}, 参数: '{text}'")
+
     all_data = load_user_data()
     schedules = load_schedules()
 
     if cmd == "/reset":
         if text == "yes":
-            # 清空 user_data
-            if user_id in all_data:
-                # 保留 channel 信息以便定时任务
-                saved_channel = all_data[user_id].get("channel")
-                all_data[user_id] = {
-                    "history": [],
-                    "api": DEFAULT_API,
-                    "mode": "long",
-                    "points_used": 0,
-                    "channel": saved_channel
-                }
-                save_user_data(all_data)
-            
-            # 清空 schedules
-            if user_id in schedules:
-                schedules[user_id] = {"timed": [], "daily": [], "special_dates": {}}
-                save_schedules(schedules)
-            
-            # 清空 chat_logs
-            clear_chat_logs(channel)
-            log_message(channel, None, None, is_reset=True)
-            
-            return jsonify({
-                "response_type": "in_channel",
-                "text": "✅ 已重置！对话历史、用户数据、聊天记录、定时任务已清空（记忆保留）"
-            })
+            try:
+                # 清空 user_data
+                if user_id in all_data:
+                    saved_channel = all_data[user_id].get("channel")
+                    all_data[user_id] = {
+                        "history": [],
+                        "api": DEFAULT_API,
+                        "mode": "long",
+                        "points_used": 0,
+                        "channel": saved_channel
+                    }
+                    save_user_data(all_data)
+                
+                # 清空 schedules
+                if user_id in schedules:
+                    schedules[user_id] = {"timed": [], "daily": [], "special_dates": {}}
+                    save_schedules(schedules)
+                
+                # 清空 chat_logs
+                clear_chat_logs(channel)
+                log_message(channel, None, None, is_reset=True)
+                
+                return jsonify({
+                    "response_type": "in_channel",
+                    "text": "✅ 已重置！对话历史、用户数据、聊天记录、定时任务已清空（记忆保留）"
+                })
+            except Exception as e:
+                print(f"[Error] /reset yes 失败: {str(e)}")
+                return jsonify({
+                    "response_type": "ephemeral",
+                    "text": f"❌ 重置失败：{str(e)}"
+                })
         
         elif text == "no":
             return jsonify({
@@ -780,8 +792,11 @@ def commands():
             })
         
         if text == "clear yes":
-            clear_memories(user_id)
-            return jsonify({"response_type": "ephemeral", "text": "✅ 记忆已清空！"})
+            try:
+                clear_memories(user_id)
+                return jsonify({"response_type": "ephemeral", "text": "✅ 记忆已清空！"})
+            except Exception as e:
+                return jsonify({"response_type": "ephemeral", "text": f"❌ 清空失败：{str(e)}"})
         
         if text == "clear no":
             return jsonify({"response_type": "ephemeral", "text": "❌ 已取消"})
@@ -821,14 +836,16 @@ def commands():
                 "text": f"当前: {current}\n剩余积分: {points_str}\n\n可用:\n" + "\n".join(models_info)
             })
 
-        if text in APIS:
+        # 注意：model 名字可能有大写，不要 lower()
+        original_text = request.form.get("text", "").strip()
+        if original_text in APIS:
             if user_id not in all_data:
                 all_data[user_id] = {"history": [], "api": DEFAULT_API, "mode": "long", "points_used": 0}
-            all_data[user_id]["api"] = text
+            all_data[user_id]["api"] = original_text
             save_user_data(all_data)
-            vision = "✅" if APIS[text].get("vision") else "❌"
-            cost = APIS[text].get("cost", 1)
-            return jsonify({"response_type": "ephemeral", "text": f"✅ {text}（{cost}分/次，图片{vision}）"})
+            vision = "✅" if APIS[original_text].get("vision") else "❌"
+            cost = APIS[original_text].get("cost", 1)
+            return jsonify({"response_type": "ephemeral", "text": f"✅ {original_text}（{cost}分/次，图片{vision}）"})
         else:
             return jsonify({"response_type": "ephemeral", "text": "❌ 没有这个模型"})
 
