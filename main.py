@@ -685,6 +685,22 @@ def events():
         channel = event.get("channel")
         text = re.sub(r'<@\w+>', '', event.get("text", "")).strip()
 
+        # 忽略斜杠命令（避免重复处理）
+        if text.startswith("/"):
+            return jsonify({"ok": True})
+        
+        # 忽略空消息
+        if not text:
+            images = []
+            files = event.get("files", [])
+            for f in files:
+                if f.get("mimetype", "").startswith("image/"):
+                    url = f.get("url_private")
+                    if url:
+                        images.append(url)
+            if not images:
+                return jsonify({"ok": True})
+
         images = []
         files = event.get("files", [])
         for f in files:
