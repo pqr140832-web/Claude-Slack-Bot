@@ -61,9 +61,6 @@ pending_messages = {}
 pending_timers = {}
 pending_clear_logs = {}
 
-# 记录刚执行过 /reset 的用户，防止消息被当作普通对话
-reset_cooldown = set()
-
 # ========== JSONBin 工具函数 ==========
 
 def jsonbin_save(bin_id, data):
@@ -432,7 +429,7 @@ def parse_hidden_commands(reply, user_id):
     mems_with_user = re.findall(r'\[\[记忆\|([A-Z0-9]+)\|(.+?)\]\]', reply)
     for mem_user_id, content in mems_with_user:
         add_memory(mem_user_id, content)
-        reply = reply.replace(f"[[记忆|{mem_user_id}|{content}]]", "")
+        reply = reply.replace(f"[[记��|{mem_user_id}|{content}]]", "")
         has_hidden = True
 
     mems_simple = re.findall(r'\[\[记忆\|([^|]+?)\]\]', reply)
@@ -715,12 +712,6 @@ def events():
             print(f"[Events] 忽略斜杠命令: {text}")
             return jsonify({"ok": True})
 
-        # 检查是否在 reset 冷却期内
-        if user_id in reset_cooldown:
-            reset_cooldown.discard(user_id)
-            print(f"[Events] 用户 {user_id} 在 reset 冷却期，忽略此消息")
-            return jsonify({"ok": True})
-
         images = []
         files = event.get("files", [])
         for f in files:
@@ -769,9 +760,6 @@ def commands():
     schedules = load_schedules()
 
     if cmd == "/reset":
-        # 将用户加入冷却期，防止后续事件触发 AI
-        reset_cooldown.add(user_id)
-        
         def do_reset():
             try:
                 data = load_user_data()
