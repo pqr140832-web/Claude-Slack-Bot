@@ -20,9 +20,9 @@ JSONBIN_MEMORIES = os.environ.get("JSONBIN_MEMORIES")
 JSONBIN_CHAT_LOGS = os.environ.get("JSONBIN_CHAT_LOGS")
 
 API_TOKEN_LIMITS = {
-    "第三方sonnet": 110000,
-    "sonnet": 190000,
-    "opus": 190000
+    "第三方sonnet": 100000,
+    "sonnet": 100000,
+    "opus": 100000
 }
 
 APIS = {
@@ -59,7 +59,7 @@ CN_TIMEZONE = timezone(timedelta(hours=8))
 processed_events = set()
 pending_messages = {}
 pending_timers = {}
-pending_confirmations = {}  # 等待确认的操作
+pending_clear_logs = {}  # 等待清空聊天记录：{user_id: {"channel": ..., "count": 5}}
 
 # ========== JSONBin 工具函数 ==========
 
@@ -373,9 +373,7 @@ Slack 格式规则：
 
 *隐藏规则*：
 - 设定的隐藏内容你下次能看到
-- 用户要求设提醒时，自然地确认并告知设置的时间
-- 当你认为某一时间会想念用户或只是想在某一时间给用户主动发消息，你也可以设置定时消息、每日消息或特殊日期
-- 记录特殊日期并非硬性规定，只要你认为需要记录的日期都可以是特殊日期。特殊日期最好也一并记入长期记忆"""
+- 用户要求设提醒时，自然地确认并告知设置的时间"""
 
     if mode == "short":
         base += """
@@ -523,71 +521,25 @@ def download_image(url):
         print(f"下载失败: {e}")
     return None
 
-# ========== 处理确认消息 ==========
+# ========== 检查并清空聊天记录 ==========
 
-def handle_confirmation(user_id, channel, text):
-    """处理 yes/no 确认，返回 True 表示已处理"""
-    if user_id not in pending_confirmations:
-        return False
-    
-    text_lower = text.lower().strip()
-    
-    if text_lower in ["yes", "是", "确认", "确定", "y"]:
-        confirmation = pending_confirmations[user_id]
-        action = confirmation.get("action")
+def check_pending_clear(user_id, channel):
+    """检查是否需要清空聊天记录"""
+    if user_id in pending_clear_logs:
+        pending_clear_logs[user_id]["count"] -= 1
+        remaining = pending_clear_logs[user_id]["count"]
+        print(f"[PendingClear] 用户 {user_id} 还剩 {remaining} 条消息后清空")
         
-        def do_action():
-            try:
-                if action == "reset":
-                    data = load_user_data()
-                    if user_id in data:
-                        saved_channel = data[user_id].get("channel")
-                        data[user_id] = {
-                            "history": [],
-                            "api": DEFAULT_API,
-                            "mode": "long",
-                            "points_used": 0,
-                            "channel": saved_channel
-                        }
-                        save_user_data(data)
-                    
-                    scheds = load_schedules()
-                    if user_id in scheds:
-                        scheds[user_id] = {"timed": [], "daily": [], "special_dates": {}}
-                        save_schedules(scheds)
-                    
-                    clear_chat_logs(channel)
-                    log_message(channel, None, None, is_reset=True)
-                    
-                    send_slack(channel, "✅ 已重置！对话历史、用户数据、聊天记录、定时任务已清空（记忆保留）")
-                
-                elif action == "clear_memory":
-                    clear_memories(user_id)
-                    send_slack(channel, "✅ 记忆已清空！")
-                
-                print(f"[Confirmation] 用户 {user_id} 执行 {action} 完成")
-            except Exception as e:
-                print(f"[Error] 执行 {action} 失败: {str(e)}")
-                send_slack(channel, f"❌ 操作失败：{str(e)}")
-        
-        threading.Thread(target=do_action).start()
-        del pending_confirmations[user_id]
-        return True
-    
-    elif text_lower in ["no", "否", "取消", "n"]:
-        del pending_confirmations[user_id]
-        send_slack(channel, "❌ 已取消")
-        return True
-    
-    return False
+        if remaining <= 0:
+            # 清空聊天记录
+            clear_chat_logs(channel)
+            log_message(channel, None, None, is_reset=True)
+            del pending_clear_logs[user_id]
+            print(f"[PendingClear] 用户 {user_id} 聊天记录已清空")
 
 # ========== 处理消息 ==========
 
 def process_message(user_id, channel, text, images=None):
-    # 先检查是否是确认消息
-    if handle_confirmation(user_id, channel, text):
-        return
-    
     all_data = load_user_data()
     user = all_data.get(user_id, {
         "history": [],
@@ -651,6 +603,9 @@ def process_message(user_id, channel, text, images=None):
     all_data[user_id] = user
     save_user_data(all_data)
 
+    # 检查是否需要清空聊天记录
+    check_pending_clear(user_id, channel)
+
     if not visible_reply.strip():
         delete_slack(channel, typing_ts)
     elif mode == "short" and "|||" in visible_reply:
@@ -668,10 +623,6 @@ def delayed_process(user_id, channel):
     if user_id in pending_messages and pending_messages[user_id]:
         combined = "\n".join(pending_messages[user_id])
         pending_messages[user_id] = []
-
-        # 检查是否是确认消息
-        if handle_confirmation(user_id, channel, combined):
-            return
 
         all_data = load_user_data()
         user = all_data.get(user_id, {
@@ -712,6 +663,9 @@ def delayed_process(user_id, channel):
 
         all_data[user_id] = user
         save_user_data(all_data)
+
+        # 检查是否需要清空聊天记录
+        check_pending_clear(user_id, channel)
 
         if not visible_reply.strip():
             delete_slack(channel, typing_ts)
@@ -754,7 +708,6 @@ def events():
         channel = event.get("channel")
         text = re.sub(r'<@\w+>', '', event.get("text", "")).strip()
 
-        # 忽略空消息（除非有图片）
         images = []
         files = event.get("files", [])
         for f in files:
@@ -803,14 +756,43 @@ def commands():
     schedules = load_schedules()
 
     if cmd == "/reset":
-        # 设置等待确认
-        pending_confirmations[user_id] = {
-            "action": "reset",
-            "channel": channel
+        def do_reset():
+            try:
+                # 清空 user_data
+                data = load_user_data()
+                if user_id in data:
+                    saved_channel = data[user_id].get("channel")
+                    data[user_id] = {
+                        "history": [],
+                        "api": DEFAULT_API,
+                        "mode": "long",
+                        "points_used": 0,
+                        "channel": saved_channel
+                    }
+                    save_user_data(data)
+                
+                # 清空 schedules
+                scheds = load_schedules()
+                if user_id in scheds:
+                    scheds[user_id] = {"timed": [], "daily": [], "special_dates": {}}
+                    save_schedules(scheds)
+                
+                print(f"[Reset] 用户 {user_id} 重置完成（等待5条消息后清空聊天记录）")
+            except Exception as e:
+                print(f"[Error] 重置失败: {str(e)}")
+        
+        # 后台执行重置
+        threading.Thread(target=do_reset).start()
+        
+        # 设置等待清空聊天记录
+        pending_clear_logs[user_id] = {
+            "channel": channel,
+            "count": 5
         }
+        
         return jsonify({
             "response_type": "in_channel",
-            "text": "⚠️ *确定要重置吗？*\n\n将清空：对话历史、用户数据、聊天记录、定时任务\n保留：记忆\n\n📝 现在可以去 JSONBin 备份\n\n回复 *yes* 确认，回复 *no* 取消"
+            "text": "✅ 已重置！对话历史、定时任务已清空（记忆保留）\n\n📝 聊天记录将在 *5 条消息后* 清空，现在可以去 JSONBin 备份"
         })
 
     if cmd == "/memory":
@@ -823,14 +805,15 @@ def commands():
                 return jsonify({"response_type": "ephemeral", "text": "📝 暂无记忆"})
 
         if text == "clear":
-            pending_confirmations[user_id] = {
-                "action": "clear_memory",
-                "channel": channel
-            }
-            return jsonify({
-                "response_type": "in_channel",
-                "text": "⚠️ *确定要清空所有记忆吗？*\n\n📝 现在可以去 JSONBin 备份\n\n回复 *yes* 确认，回复 *no* 取消"
-            })
+            def do_clear():
+                try:
+                    clear_memories(user_id)
+                    print(f"[Memory] 用户 {user_id} 记忆已清空")
+                except Exception as e:
+                    print(f"[Error] 清空记忆失败: {str(e)}")
+            
+            threading.Thread(target=do_clear).start()
+            return jsonify({"response_type": "ephemeral", "text": "✅ 记忆已清空！"})
 
         if text.startswith("delete "):
             try:
