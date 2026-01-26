@@ -263,6 +263,26 @@ def get_channel_name(channel_id):
         pass
     return f"#{channel_id}"
 
+def get_channel_id_by_name(name):
+    """根据频道名获取频道 ID"""
+    name = name.lower().strip().lstrip('#')
+    
+    try:
+        resp = requests.get(
+            "https://slack.com/api/conversations.list",
+            headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+            params={"types": "public_channel,private_channel", "limit": 200}
+        )
+        result = resp.json()
+        if result.get("ok"):
+            for ch in result.get("channels", []):
+                if ch["name"].lower() == name:
+                    return ch["id"]
+    except Exception as e:
+        print(f"获取频道列表失败: {e}")
+    
+    return None
+
 # ========== 历史记录管理 ==========
 
 def estimate_tokens(text):
@@ -314,6 +334,7 @@ def get_display_name(user_id):
     return user_id
 
 def get_user_dm_channel(user_id):
+    """获取或创建与用户的私聊频道"""
     try:
         resp = requests.post(
             "https://slack.com/api/conversations.open",
@@ -326,8 +347,8 @@ def get_user_dm_channel(user_id):
         result = resp.json()
         if result.get("ok"):
             return result["channel"]["id"]
-    except:
-        pass
+    except Exception as e:
+        print(f"获取私聊频道失败: {e}")
     return None
 
 def is_unlimited_user(user_id):
@@ -412,12 +433,14 @@ Slack 格式规则：
 
 5. *跨场景发消息*：
    [[私聊|内容]] - 在频道时发私聊消息给用户
-   [[发送到频道|内容]] - 在私聊时发消息到频道
+   [[发到频道|频道名|内容]] - 发消息到指定频道（可用：chat、general、random）
+   例如：[[发到频道|chat|大家好！]]
 
 6. *表情反应*：
    [[反应|emoji名称]] - 给用户的消息加表情
-   例如：[[反应|heart]] [[反应|eyes]] [[反应|thumbsup]]
-   常用：heart, eyes, thumbsup, joy, thinking_face, fire, sparkles, wave
+   使用场景：用户说了让你开心/感动/好笑的话、分享好消息、简单认可
+   不要每条都加，偶尔用更自然
+   可用：heart, thumbsup, joy, sob, fire, eyes, thinking_face, clap, tada, star, wave, pray, sparkles
 
 *记忆规则*：
 - 只记长期有效的重要信息（姓名、生日、喜好等）
@@ -441,37 +464,37 @@ Slack 格式规则：
 - 使用24小时制
 
 *回复规则*：
-- 如果你觉得用户的消息不需要回复（比如只是"嗯"、"哦"、"好"、表情等），可以只加个表情反应，或回复：[不回]
+- 如果你觉得用户的消息不需要回复（比如只是"嗯"、"哦"、"好"、表情等），可以只回复：[不回]
 - 不要滥用，正常对话还是要回复的"""
 
     if mode == "short":
         base += f"""
 
-===== 短句模式（重要！必须遵守）=====
+===== 短句模式 =====
 
-你现在是短句模式，像真人聊天一样：
+你现在是短句模式，像朋友发微信一样聊天：
 
-*回复数量规则*：
+*回复数量参考*：
 - 用户发了 {msg_count} 条消息
-- 你应该回复 1-{min(msg_count + 1, 3)} 条左右
-- 大部分情况 1-2 条就够了
-- 只有用户发很多或问了复杂问题才回多条
+- 一般回复 1-2 条就够了
+- 如果用户发了很长的内容或问了复杂问题，可以回 2-3 条
+- 用户发了很多条，你也可以相应多回几条
 - 用 ||| 分隔多条消息
 
 *风格*：
-- 每条消息简短（1-2句话）
-- 像朋友聊天，不要太正式
-- 不要每次都回3条以上，很奇怪
+- 每条消息简短自然
+- 像朋友聊天，轻松一点
+- 不用每次都回很多条
 
-示例：
+*示例*：
 用户：在吗
-你：在呀
+你：在~
 
 用户：今天天气怎么样
-你：还不错哦|||挺适合出门的
+你：还不错哦|||适合出门
 
-用户发了很长的问题
-你：好的|||我来想想|||（回答内容）"""
+用户：（发了一大段话）
+你：哇这个好有意思|||让我想想..."""
 
     return base
 
@@ -555,17 +578,17 @@ def parse_hidden_commands(reply, user_id, current_channel=None):
         reply = reply.replace(f"[[私聊|{msg}]]", "")
         has_hidden = True
 
-    # 跨场景：发送到频道
-    channel_messages = re.findall(r'\[\[发送到频道\|(.+?)\]\]', reply)
-    for msg in channel_messages:
-        extra_actions.append({"type": "channel", "content": msg})
-        reply = reply.replace(f"[[发送到频道|{msg}]]", "")
+    # 跨场景：发送到指定频道
+    channel_messages = re.findall(r'\[\[发到频道\|(\w+)\|(.+?)\]\]', reply)
+    for ch_name, msg in channel_messages:
+        extra_actions.append({"type": "to_channel", "channel_name": ch_name, "content": msg})
+        reply = reply.replace(f"[[发到频道|{ch_name}|{msg}]]", "")
         has_hidden = True
 
     # 表情反应
-    reactions = re.findall(r'\[\[反应\|(.+?)\]\]', reply)
+    reactions = re.findall(r'\[\[反应\|(\w+)\]\]', reply)
     for emoji in reactions:
-        extra_actions.append({"type": "reaction", "emoji": emoji})
+        extra_actions.append({"type": "reaction", "emoji": emoji.lower().strip()})
         reply = reply.replace(f"[[反应|{emoji}]]", "")
         has_hidden = True
 
@@ -629,39 +652,22 @@ def delete_slack(channel, ts):
 
 def add_reaction(channel, ts, emoji):
     """给消息添加表情反应"""
-    emoji = emoji.strip().strip(':').lower()
+    emoji = emoji.strip().lower().replace(':', '').replace(' ', '_')
     
-    # emoji 映射
-    emoji_map = {
-        '👀': 'eyes',
-        '❤️': 'heart',
-        '😀': 'grinning',
-        '😂': 'joy',
-        '🤔': 'thinking_face',
-        '👍': 'thumbsup',
-        '👎': 'thumbsdown',
-        '🎉': 'tada',
-        '🔥': 'fire',
-        '💯': '100',
-        '😊': 'blush',
-        '😢': 'cry',
-        '🙏': 'pray',
-        '✨': 'sparkles',
-        '💪': 'muscle',
-        '🤗': 'hugs',
-        '😴': 'sleeping',
-        '😍': 'heart_eyes',
-        '👋': 'wave',
-        '☀️': 'sunny',
-        '⭐': 'star',
-        '💕': 'two_hearts',
-        '😭': 'sob',
-        '✅': 'white_check_mark',
-        '❌': 'x',
-    }
+    # 有效的 emoji 列表
+    valid_emojis = [
+        'heart', 'thumbsup', 'thumbsdown', 'joy', 'sob', 'fire', 
+        'eyes', 'thinking_face', 'clap', 'tada', 'star', 'rocket',
+        'wave', 'pray', 'muscle', 'sparkles', 'heart_eyes', 'laughing',
+        'smile', 'grin', 'wink', 'blush', 'relaxed', 'ok_hand',
+        'raised_hands', 'hugs', '100', 'sunglasses', '+1', '-1',
+        'white_check_mark', 'x', 'question', 'exclamation',
+        'zzz', 'sweat_smile', 'thinking', 'face_with_rolling_eyes'
+    ]
     
-    if emoji in emoji_map:
-        emoji = emoji_map[emoji]
+    if emoji not in valid_emojis:
+        print(f"[Reaction] 不支持的 emoji: {emoji}，跳过")
+        return
     
     try:
         result = requests.post(
@@ -706,31 +712,33 @@ def download_image(url):
 
 def execute_extra_actions(extra_actions, user_id, current_channel, message_ts=None, current_mode="long"):
     """执行额外操作"""
-    all_data = load_user_data()
-    user = all_data.get(user_id, {})
-    
     for action in extra_actions:
         if action["type"] == "dm":
-            dm_channel = get_user_dm_channel(user_id)
-            if dm_channel and dm_channel != current_channel:
-                content = action["content"]
-                if current_mode == "short" and "|||" in content:
-                    parts = content.split("|||")
-                    send_multiple_slack(dm_channel, parts)
-                else:
-                    send_slack(dm_channel, content)
-                print(f"[CrossChannel] 发送私聊消息给 {user_id}")
+            if not is_dm_channel(current_channel):
+                dm_channel = get_user_dm_channel(user_id)
+                if dm_channel:
+                    content = action["content"]
+                    if current_mode == "short" and "|||" in content:
+                        parts = content.split("|||")
+                        send_multiple_slack(dm_channel, parts)
+                    else:
+                        send_slack(dm_channel, content)
+                    print(f"[CrossChannel] 从频道发私聊消息给 {user_id}")
         
-        elif action["type"] == "channel":
-            target_channel = user.get("last_channel")
-            if target_channel and is_dm_channel(current_channel):
+        elif action["type"] == "to_channel":
+            channel_name = action["channel_name"].lower()
+            target_channel = get_channel_id_by_name(channel_name)
+            
+            if target_channel:
                 content = action["content"]
                 if current_mode == "short" and "|||" in content:
                     parts = content.split("|||")
                     send_multiple_slack(target_channel, parts)
                 else:
                     send_slack(target_channel, content)
-                print(f"[CrossChannel] 发送频道消息到 {target_channel}")
+                print(f"[CrossChannel] 发送消息到 #{channel_name}")
+            else:
+                print(f"[CrossChannel] 找不到频道: {channel_name}")
         
         elif action["type"] == "reaction" and message_ts:
             add_reaction(current_channel, message_ts, action["emoji"])
@@ -771,8 +779,12 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
 
     display_name = get_display_name(user_id)
     user["last_active"] = get_cn_time().timestamp()
-    user["dm_channel"] = channel if is_dm else user.get("dm_channel")
-    user["last_channel"] = channel if not is_dm else user.get("last_channel")
+    
+    # 保存频道信息
+    if is_dm:
+        user["dm_channel"] = channel
+    else:
+        user["last_channel"] = channel
 
     mode = user.get("mode", "long")
 
@@ -787,7 +799,6 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
     current_history = user.get(current_history_key, []).copy()
     other_history = user.get(other_history_key, []).copy()
     
-    # 添加其他场景历史作为参考
     if other_history:
         other_scene = "频道" if is_dm else "私聊"
         other_history_trimmed = trim_history_for_api(other_history.copy(), current_api, 0.3)
@@ -798,11 +809,9 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
                 context_text += f"{role_name}: {m['content']}\n"
             messages.append({"role": "system", "content": context_text})
     
-    # 添加当前场景历史
     current_history_trimmed = trim_history_for_api(current_history.copy(), current_api, 0.6)
     messages.extend(current_history_trimmed)
 
-    # 添加当前消息
     has_image = False
     if images and len(images) > 0:
         has_image = True
@@ -831,7 +840,6 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
     model_name = APIS.get(current_api, {}).get("model", current_api)
     log_message(channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
 
-    # 保存历史
     if current_history_key not in user:
         user[current_history_key] = []
     user[current_history_key].append({"role": "user", "content": text})
@@ -842,10 +850,8 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
 
     check_pending_clear(user_id, channel)
 
-    # 执行额外操作
     execute_extra_actions(extra_actions, user_id, channel, message_ts, mode)
 
-    # 处理回复
     if "[不回]" in visible_reply or not visible_reply.strip():
         delete_slack(channel, typing_ts)
     elif mode == "short" and "|||" in visible_reply:
@@ -887,6 +893,12 @@ def delayed_process(user_id, channel, message_ts=None):
 
         display_name = get_display_name(user_id)
         log_message(channel, "user", combined, username=display_name)
+
+        # 保存频道信息
+        if is_dm:
+            user["dm_channel"] = channel
+        else:
+            user["last_channel"] = channel
 
         system = get_system_prompt("short", user_id, channel, msg_count)
         messages = [{"role": "system", "content": system}]
@@ -1163,7 +1175,6 @@ def run_scheduler():
             now = get_cn_time()
             current_time = now.strftime("%H:%M")
             current_date_md = now.strftime("%m-%d")
-            hour = now.hour
 
             print(f"[Scheduler] 检查时间: {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -1177,15 +1188,25 @@ def run_scheduler():
 
             all_data = load_user_data()
             schedules = load_schedules()
-            schedules_changed = False
 
             for user_id, user in all_data.items():
+                # 尝试获取频道
                 dm_channel = user.get("dm_channel")
                 last_channel = user.get("last_channel")
-                channel = dm_channel or last_channel
                 
+                # 如果没有频道记录，尝试创建私聊频道
+                if not dm_channel and not last_channel:
+                    dm_channel = get_user_dm_channel(user_id)
+                    if dm_channel:
+                        user["dm_channel"] = dm_channel
+                        all_data[user_id] = user
+                        print(f"[Scheduler] 为用户 {user_id} 创建了私聊频道 {dm_channel}")
+                    else:
+                        print(f"[Scheduler] 用户 {user_id} 无法获取频道，跳过")
+                        continue
+                
+                channel = dm_channel or last_channel
                 if not channel:
-                    print(f"[Scheduler] 用户 {user_id} 没有频道记录，跳过")
                     continue
 
                 user_schedules = schedules.get(user_id, {"timed": [], "daily": [], "special_dates": {}})
@@ -1196,26 +1217,19 @@ def run_scheduler():
                 timed = user_schedules.get("timed", [])
                 new_timed = []
                 
-                print(f"[Scheduler] 用户 {user_id} 有 {len(timed)} 个定时任务")
-                
                 for item in timed:
                     item_time = item.get("time", "")
                     item_date = item.get("date", "")
                     
                     if not item_time or not item_date:
-                        print(f"[Scheduler] 任务缺少时间或日期，跳过: {item}")
                         continue
                     
-                    # 标准化时间
                     if len(item_time.split(":")[0]) == 1:
                         item_time = "0" + item_time
                     
                     try:
                         target_datetime = datetime.strptime(f"{item_date} {item_time}", "%Y-%m-%d %H:%M")
                         target_datetime = target_datetime.replace(tzinfo=CN_TIMEZONE)
-                        
-                        print(f"[Scheduler] 检查任务: 目标={item_date} {item_time}, 当前={now.strftime('%Y-%m-%d %H:%M')}, 触发={now >= target_datetime}")
-                        
                     except Exception as e:
                         print(f"[Scheduler] 日期解析失败: {item}, 错误: {e}")
                         new_timed.append(item)
@@ -1267,12 +1281,6 @@ def run_scheduler():
                                 execute_extra_actions(extra_actions, user_id, target_channel, None, current_mode)
                                 
                                 print(f"[Scheduler] 已发送定时消息给 {user_id}")
-                            else:
-                                print(f"[Scheduler] 可见回复为空或不回")
-                        else:
-                            print(f"[Scheduler] AI选择不发送")
-                        
-                        schedules_changed = True
                     else:
                         new_timed.append(item)
                 
