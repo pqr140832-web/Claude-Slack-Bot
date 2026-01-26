@@ -103,6 +103,22 @@ def get_time_str():
     now = get_cn_time()
     return now.strftime("%Y年%m月%d日 %H:%M:%S 星期") + weekdays[now.weekday()]
 
+def get_time_period():
+    """获取当前时间段描述"""
+    hour = get_cn_time().hour
+    if 5 <= hour < 9:
+        return "早上", "早上好之类的问候"
+    elif 9 <= hour < 12:
+        return "上午", "上午的问候"
+    elif 12 <= hour < 14:
+        return "中午", "中午好、吃饭了吗之类的"
+    elif 14 <= hour < 18:
+        return "下午", "下午的问候"
+    elif 18 <= hour < 22:
+        return "晚上", "晚上好之类的"
+    else:
+        return "深夜", "注意休息之类的关心"
+
 # ========== 数据持久化 ==========
 
 def load_user_data():
@@ -292,16 +308,108 @@ def estimate_tokens(text):
     other_chars = len(str(text)) - chinese_chars
     return int(chinese_chars / 1.5 + other_chars / 4)
 
-def trim_history_for_api(history, api_name, max_ratio=1.0):
-    max_tokens = int(API_TOKEN_LIMITS.get(api_name, 100000) * max_ratio)
+def build_history_messages(user, current_is_dm, api_name, for_scheduled=False):
+    """
+    构建历史记录消息，优先保留当前场景的历史
     
-    total_tokens = sum(estimate_tokens(m.get("content", "")) for m in history)
+    for_scheduled: 如果是定时任务，历史作为文本放在系统消息里
+    """
+    max_tokens = API_TOKEN_LIMITS.get(api_name, 100000)
+    # 给系统提示词和新消息留空间
+    available_tokens = int(max_tokens * 0.7)
     
-    while total_tokens > max_tokens and len(history) > 2:
-        removed = history.pop(0)
-        total_tokens -= estimate_tokens(removed.get("content", ""))
+    current_key = "dm_history" if current_is_dm else "channel_history"
+    other_key = "channel_history" if current_is_dm else "dm_history"
     
-    return history
+    current_history = user.get(current_key, []).copy()
+    other_history = user.get(other_key, []).copy()
+    
+    if for_scheduled:
+        # 定时任务：把历史作为文本返回
+        result_text = ""
+        total_tokens = 0
+        
+        # 先加当前场景的历史（从最新开始）
+        current_entries = []
+        for m in reversed(current_history):
+            tokens = estimate_tokens(m.get("content", ""))
+            if total_tokens + tokens > available_tokens * 0.8:
+                break
+            current_entries.insert(0, m)
+            total_tokens += tokens
+        
+        # 再加其他场景的历史
+        other_entries = []
+        for m in reversed(other_history):
+            tokens = estimate_tokens(m.get("content", ""))
+            if total_tokens + tokens > available_tokens:
+                break
+            other_entries.insert(0, m)
+            total_tokens += tokens
+        
+        # 构建文本
+        if other_entries:
+            other_scene = "频道" if current_is_dm else "私聊"
+            result_text += f"\n===== {other_scene}的对话记录（仅供参考）=====\n"
+            for m in other_entries:
+                role = "用户" if m["role"] == "user" else "你"
+                result_text += f"{role}：{m['content']}\n"
+        
+        if current_entries:
+            current_scene = "私聊" if current_is_dm else "频道"
+            result_text += f"\n===== {current_scene}的对话记录（当前场景）=====\n"
+            for m in current_entries:
+                role = "用户" if m["role"] == "user" else "你"
+                result_text += f"{role}：{m['content']}\n"
+        
+        if result_text:
+            result_text += "===== 对话记录结束 =====\n"
+            result_text += "\n*注意：以上是历史对话记录，不是用户现在发的消息。*\n"
+        
+        return result_text
+    
+    else:
+        # 普通对话：返回 messages 列表
+        messages = []
+        total_tokens = 0
+        
+        # 先计算当前场景需要多少
+        current_tokens = sum(estimate_tokens(m.get("content", "")) for m in current_history)
+        other_tokens = sum(estimate_tokens(m.get("content", "")) for m in other_history)
+        
+        # 如果当前场景就超了，只保留当前场景
+        if current_tokens > available_tokens:
+            while current_tokens > available_tokens and current_history:
+                removed = current_history.pop(0)
+                current_tokens -= estimate_tokens(removed.get("content", ""))
+            messages.extend(current_history)
+        else:
+            # 先放其他场景的历史
+            other_available = available_tokens - current_tokens
+            other_messages = []
+            other_used = 0
+            
+            for m in reversed(other_history):
+                tokens = estimate_tokens(m.get("content", ""))
+                if other_used + tokens > other_available:
+                    break
+                other_messages.insert(0, m)
+                other_used += tokens
+            
+            # 添加其他场景（作为系统消息标注）
+            if other_messages:
+                other_scene = "频道" if current_is_dm else "私聊"
+                context_text = f"===== 以下是{other_scene}的对话记录（参考用）=====\n"
+                for m in other_messages:
+                    role = "用户" if m["role"] == "user" else "你"
+                    context_text += f"{role}：{m['content']}\n"
+                context_text += f"===== {other_scene}记录结束 =====\n"
+                messages.append({"role": "system", "content": context_text})
+            
+            # 添加当前场景历史
+            messages.extend(current_history)
+        
+        return messages
 
 # ========== 其他工具 ==========
 
@@ -389,8 +497,11 @@ def get_system_prompt(mode="long", user_id=None, channel=None, msg_count=1):
                 memories_text = f"\n\n{mem}"
 
     current_scene = "私聊" if is_dm_channel(channel) else get_channel_name(channel)
+    time_period, time_greeting = get_time_period()
     
-    base = f"""你是一个友好的AI助手。当前时间（中国时间）: {get_time_str()}
+    base = f"""你是一个友好的AI助手。
+当前时间（中国时间）: {get_time_str()}
+现在是{time_period}，说话时注意符合这个时间段（比如{time_greeting}）
 当前场景：{current_scene}
 {memories_text}
 
@@ -472,29 +583,31 @@ Slack 格式规则：
 
 ===== 短句模式 =====
 
-你现在是短句模式，像朋友发微信一样聊天：
+你现在是短句模式，像朋友发微信一样聊天。
 
-*回复数量参考*：
-- 用户发了 {msg_count} 条消息
-- 一般回复 1-2 条就够了
-- 如果用户发了很长的内容或问了复杂问题，可以回 2-3 条
-- 用户发了很多条，你也可以相应多回几条
+*回复数量规则*：
+- 用户这次发了 {msg_count} 条消息
+- 根据情况决定回复数量：
+  • 用户发 1 条简短消息（比如"在吗"、"嗯"、"哦"）→ 你回 1 条
+  • 用户发 1 条普通消息 → 你回 1-2 条
+  • 用户发 1 条很长的消息或问了复杂问题 → 你可以回 2-3 条
+  • 用户连续发了好几条 → 你可以相应多回几条
 - 用 ||| 分隔多条消息
 
 *风格*：
-- 每条消息简短自然
-- 像朋友聊天，轻松一点
-- 不用每次都回很多条
+- 每条消息简短自然，像发微信
+- 不要太正式，轻松一点
+- 该回 1 条就 1 条，不要硬凑
 
 *示例*：
 用户：在吗
 你：在~
 
-用户：今天天气怎么样
-你：还不错哦|||适合出门
+用户：今天好累啊
+你：怎么啦|||工作太多了？
 
-用户：（发了一大段话）
-你：哇这个好有意思|||让我想想..."""
+用户：（发了一大段话讲了很多事情）
+你：哇这也太多了吧|||一个一个说|||先说第一个..."""
 
     return base
 
@@ -654,7 +767,6 @@ def add_reaction(channel, ts, emoji):
     """给消息添加表情反应"""
     emoji = emoji.strip().lower().replace(':', '').replace(' ', '_')
     
-    # 有效的 emoji 列表
     valid_emojis = [
         'heart', 'thumbsup', 'thumbsdown', 'joy', 'sob', 'fire', 
         'eyes', 'thinking_face', 'clap', 'tada', 'star', 'rocket',
@@ -780,7 +892,6 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
     display_name = get_display_name(user_id)
     user["last_active"] = get_cn_time().timestamp()
     
-    # 保存频道信息
     if is_dm:
         user["dm_channel"] = channel
     else:
@@ -793,24 +904,9 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
     system = get_system_prompt(mode, user_id, channel, msg_count)
     messages = [{"role": "system", "content": system}]
     
-    current_history_key = "dm_history" if is_dm else "channel_history"
-    other_history_key = "channel_history" if is_dm else "dm_history"
-    
-    current_history = user.get(current_history_key, []).copy()
-    other_history = user.get(other_history_key, []).copy()
-    
-    if other_history:
-        other_scene = "频道" if is_dm else "私聊"
-        other_history_trimmed = trim_history_for_api(other_history.copy(), current_api, 0.3)
-        if other_history_trimmed:
-            context_text = f"===== 以下是{other_scene}的近期记录（参考用）=====\n"
-            for m in other_history_trimmed[-10:]:
-                role_name = "用户" if m["role"] == "user" else "AI"
-                context_text += f"{role_name}: {m['content']}\n"
-            messages.append({"role": "system", "content": context_text})
-    
-    current_history_trimmed = trim_history_for_api(current_history.copy(), current_api, 0.6)
-    messages.extend(current_history_trimmed)
+    # 使用新的历史构建函数
+    history_messages = build_history_messages(user, is_dm, current_api, for_scheduled=False)
+    messages.extend(history_messages)
 
     has_image = False
     if images and len(images) > 0:
@@ -840,6 +936,7 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
     model_name = APIS.get(current_api, {}).get("model", current_api)
     log_message(channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
 
+    current_history_key = "dm_history" if is_dm else "channel_history"
     if current_history_key not in user:
         user[current_history_key] = []
     user[current_history_key].append({"role": "user", "content": text})
@@ -894,7 +991,6 @@ def delayed_process(user_id, channel, message_ts=None):
         display_name = get_display_name(user_id)
         log_message(channel, "user", combined, username=display_name)
 
-        # 保存频道信息
         if is_dm:
             user["dm_channel"] = channel
         else:
@@ -903,24 +999,8 @@ def delayed_process(user_id, channel, message_ts=None):
         system = get_system_prompt("short", user_id, channel, msg_count)
         messages = [{"role": "system", "content": system}]
         
-        current_history_key = "dm_history" if is_dm else "channel_history"
-        other_history_key = "channel_history" if is_dm else "dm_history"
-        
-        current_history = user.get(current_history_key, []).copy()
-        other_history = user.get(other_history_key, []).copy()
-        
-        if other_history:
-            other_scene = "频道" if is_dm else "私聊"
-            other_history_trimmed = trim_history_for_api(other_history.copy(), current_api, 0.3)
-            if other_history_trimmed:
-                context_text = f"===== 以下是{other_scene}的近期记录（参考用）=====\n"
-                for m in other_history_trimmed[-10:]:
-                    role_name = "用户" if m["role"] == "user" else "AI"
-                    context_text += f"{role_name}: {m['content']}\n"
-                messages.append({"role": "system", "content": context_text})
-        
-        current_history_trimmed = trim_history_for_api(current_history.copy(), current_api, 0.6)
-        messages.extend(current_history_trimmed)
+        history_messages = build_history_messages(user, is_dm, current_api, for_scheduled=False)
+        messages.extend(history_messages)
         messages.append({"role": "user", "content": combined})
 
         reply = call_ai(messages, current_api)
@@ -929,6 +1009,7 @@ def delayed_process(user_id, channel, message_ts=None):
         model_name = APIS.get(current_api, {}).get("model", "未知")
         log_message(channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
 
+        current_history_key = "dm_history" if is_dm else "channel_history"
         if current_history_key not in user:
             user[current_history_key] = []
         user[current_history_key].append({"role": "user", "content": combined})
@@ -1190,11 +1271,9 @@ def run_scheduler():
             schedules = load_schedules()
 
             for user_id, user in all_data.items():
-                # 尝试获取频道
                 dm_channel = user.get("dm_channel")
                 last_channel = user.get("last_channel")
                 
-                # 如果没有频道记录，尝试创建私聊频道
                 if not dm_channel and not last_channel:
                     dm_channel = get_user_dm_channel(user_id)
                     if dm_channel:
@@ -1202,7 +1281,6 @@ def run_scheduler():
                         all_data[user_id] = user
                         print(f"[Scheduler] 为用户 {user_id} 创建了私聊频道 {dm_channel}")
                     else:
-                        print(f"[Scheduler] 用户 {user_id} 无法获取频道，跳过")
                         continue
                 
                 channel = dm_channel or last_channel
@@ -1242,21 +1320,28 @@ def run_scheduler():
                         target_channel = dm_channel or channel
                         is_dm = is_dm_channel(target_channel)
                         
-                        system = get_system_prompt(current_mode, user_id, target_channel)
+                        # 获取历史记录文本
+                        history_text = build_history_messages(user, is_dm, current_api, for_scheduled=True)
+                        
+                        # 使用完整系统提示词
+                        system = get_system_prompt(current_mode, user_id, target_channel, 1)
+                        
                         system += f"""
+{history_text}
 
-===== 定时提醒任务 =====
-你之前设定了一个提醒：{hint}
-现在时间到了。请直接发消息，不需要额外说明这是定时消息。
+===== 当前任务：定时消息 =====
+你之前设定了一个定时任务：{hint}
+现在时间到了。
 
-如果觉得现在不合适，回复：[不发]"""
+*重要*：
+- 这是你主动发消息给用户，不是在回复用户的消息
+- 用户没有发任何新消息给你
+- 上面的对话记录只是参考，让你知道最近聊了什么
+- 直接说你想说的话就好
+
+如果你觉得现在不适合发消息，回复：[不发]"""
 
                         messages = [{"role": "system", "content": system}]
-                        
-                        current_history_key = "dm_history" if is_dm else "channel_history"
-                        history = user.get(current_history_key, []).copy()
-                        history = trim_history_for_api(history, current_api, 0.6)
-                        messages.extend(history)
 
                         reply = call_ai(messages, current_api)
                         print(f"[Scheduler] AI回复: {reply[:100]}...")
@@ -1272,8 +1357,9 @@ def run_scheduler():
                                     send_slack(target_channel, visible)
                                 
                                 model_name = APIS.get(current_api, {}).get("model", "AI")
-                                log_message(target_channel, "assistant", f"[定时] {original_reply}", model=model_name, hidden=has_hidden)
+                                log_message(target_channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
                                 
+                                current_history_key = "dm_history" if is_dm else "channel_history"
                                 if current_history_key not in user:
                                     user[current_history_key] = []
                                 user[current_history_key].append({"role": "assistant", "content": original_reply})
@@ -1299,21 +1385,24 @@ def run_scheduler():
                         target_channel = dm_channel or channel
                         is_dm = is_dm_channel(target_channel)
                         
-                        system = get_system_prompt(current_mode, user_id, target_channel)
+                        history_text = build_history_messages(user, is_dm, current_api, for_scheduled=True)
+                        
+                        system = get_system_prompt(current_mode, user_id, target_channel, 1)
+                        
                         system += f"""
+{history_text}
 
-===== 每日消息任务 =====
+===== 当前任务：每日消息 =====
 你设定了每天这个时候发消息，主题：{topic}
-请直接发消息，不需要说明这是每日消息。
 
-如果觉得现在不合适，回复：[不发]"""
+*重要*：
+- 这是你主动发消息给用户，不是在回复用户的消息
+- 用户没有发任何新消息给你
+- 直接说你想说的话就好
+
+如果你觉得现在不适合发消息，回复：[不发]"""
 
                         messages = [{"role": "system", "content": system}]
-                        
-                        current_history_key = "dm_history" if is_dm else "channel_history"
-                        history = user.get(current_history_key, []).copy()
-                        history = trim_history_for_api(history, current_api, 0.6)
-                        messages.extend(history)
 
                         reply = call_ai(messages, current_api)
 
@@ -1328,8 +1417,9 @@ def run_scheduler():
                                     send_slack(target_channel, visible)
                                 
                                 model_name = APIS.get(current_api, {}).get("model", "AI")
-                                log_message(target_channel, "assistant", f"[每日] {original_reply}", model=model_name, hidden=has_hidden)
+                                log_message(target_channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
                                 
+                                current_history_key = "dm_history" if is_dm else "channel_history"
                                 if current_history_key not in user:
                                     user[current_history_key] = []
                                 user[current_history_key].append({"role": "assistant", "content": original_reply})
@@ -1348,21 +1438,24 @@ def run_scheduler():
                         target_channel = dm_channel or channel
                         is_dm = is_dm_channel(target_channel)
                         
-                        system = get_system_prompt(current_mode, user_id, target_channel)
+                        history_text = build_history_messages(user, is_dm, current_api, for_scheduled=True)
+                        
+                        system = get_system_prompt(current_mode, user_id, target_channel, 1)
+                        
                         system += f"""
+{history_text}
 
-===== 特殊日期任务 =====
+===== 当前任务：特殊日期 =====
 今天是用户的特殊日子：{desc}
-请发一条温馨的消息。
 
-如果觉得不合适，回复：[不发]"""
+*重要*：
+- 这是你主动发消息祝福用户
+- 用户没有发任何新消息给你
+- 发一条温馨的消息就好
+
+如果你觉得不合适，回复：[不发]"""
 
                         messages = [{"role": "system", "content": system}]
-                        
-                        current_history_key = "dm_history" if is_dm else "channel_history"
-                        history = user.get(current_history_key, []).copy()
-                        history = trim_history_for_api(history, current_api, 0.6)
-                        messages.extend(history)
 
                         reply = call_ai(messages, current_api)
 
@@ -1377,8 +1470,9 @@ def run_scheduler():
                                     send_slack(target_channel, visible)
                                 
                                 model_name = APIS.get(current_api, {}).get("model", "AI")
-                                log_message(target_channel, "assistant", f"[特殊] {original_reply}", model=model_name, hidden=has_hidden)
+                                log_message(target_channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
                                 
+                                current_history_key = "dm_history" if is_dm else "channel_history"
                                 if current_history_key not in user:
                                     user[current_history_key] = []
                                 user[current_history_key].append({"role": "assistant", "content": original_reply})
