@@ -22,7 +22,8 @@ JSONBIN_CHAT_LOGS = os.environ.get("JSONBIN_CHAT_LOGS")
 API_TOKEN_LIMITS = {
     "第三方sonnet": 110000,
     "sonnet": 190000,
-    "opus": 190000
+    "opus": 190000,
+    "haiku": 190000
 }
 
 APIS = {
@@ -46,6 +47,13 @@ APIS = {
         "model": "福利-claude-opus-4-5",
         "vision": True,
         "cost": 2
+    },
+    "haiku": {
+        "url": os.environ.get("API_URL_3"),
+        "key": os.environ.get("API_KEY_3"),
+        "model": "[code]claude-haiku-4-5-20251001",
+        "vision": True,
+        "cost": 1
     }
 }
 
@@ -62,16 +70,16 @@ pending_messages = {}
 pending_timers = {}
 pending_clear_logs = {}
 
-# Emoji 名称映射（AI可能���的名称 -> Slack实际名称）
+# Emoji 名称映射（AI可能用的名称 -> Slack实际名称）
 EMOJI_ALIASES = {
-    "thumbsup": "+1",
-    "thumbs_up": "+1",
-    "thumb_up": "+1",
-    "like": "+1",
-    "thumbsdown": "-1",
-    "thumbs_down": "-1",
-    "thumb_down": "-1",
-    "dislike": "-1",
+    "thumbs_up": "thumbsup",
+    "thumb_up": "thumbsup",
+    "+1": "thumbsup",
+    "like": "thumbsup",
+    "thumbs_down": "thumbsdown",
+    "thumb_down": "thumbsdown",
+    "-1": "thumbsdown",
+    "dislike": "thumbsdown",
     "joy": "laughing",
     "sob": "cry",
     "crying": "cry",
@@ -104,13 +112,11 @@ EMOJI_ALIASES = {
     "look": "eyes",
     "see": "eyes",
     "watching": "eyes",
-    "golden_star": "star",
     "ok": "ok_hand",
     "okay": "ok_hand",
     "strong": "muscle",
     "strength": "muscle",
     "flex": "muscle",
-    "hug": "hugs",
     "cool": "sunglasses",
     "check": "white_check_mark",
     "yes": "white_check_mark",
@@ -121,19 +127,15 @@ EMOJI_ALIASES = {
     "tired": "zzz",
     "sweat": "sweat_smile",
     "nervous": "sweat_smile",
-    "rocket_ship": "rocket",
-    "launch": "rocket",
 }
 
 # Slack 确认可用的 emoji 列表
 VALID_EMOJIS = [
-    # 确认能用的
-    "heart", "thinking_face", "+1", "fire", "sparkles",
-    # 很可能能用的（标准 Slack emoji）
-    "-1", "laughing", "cry", "eyes", "tada", "star", "wave", 
-    "pray", "clap", "100", "rocket", "muscle", "hugs",
-    "ok_hand", "raised_hands", "sunglasses", "white_check_mark", 
-    "x", "zzz", "sweat_smile", "blush", "wink", "grin", "smile"
+    "heart", "thumbsup", "thumbsdown", "laughing", "cry", "fire", 
+    "eyes", "thinking_face", "clap", "tada", "star", "wave", 
+    "pray", "sparkles", "100", "rocket", "muscle", "ok_hand", 
+    "raised_hands", "sunglasses", "white_check_mark", "x", "zzz", 
+    "sweat_smile", "blush", "wink", "grin", "smile"
 ]
 
 # ========== JSONBin 工具函数 ==========
@@ -623,7 +625,7 @@ Slack 格式规则：
    [[反应|emoji名称]] - 给用户的消息加表情
    使用场景：用户说了让你开心/感动/好笑的话、分享好消息、简单认可
    不要每条都加，偶尔用更自然
-   可用：heart, thumbsup, laughing, cry, fire, eyes, thinking_face, clap, tada, star, wave, pray, sparkles, 100, rocket
+   可用：heart, thumbsup, thumbsdown, laughing, cry, fire, eyes, thinking_face, clap, tada, star, wave, pray, sparkles, 100, rocket, muscle, ok_hand, raised_hands, sunglasses, white_check_mark, x, zzz, sweat_smile, blush, wink, grin, smile
 
 *记忆规则*：
 - 只记长期有效的重要信息（姓名、生日、喜好等）
@@ -783,36 +785,56 @@ def parse_hidden_commands(reply, user_id, current_channel=None):
 
     return reply, has_hidden, original_reply, extra_actions
 
-def call_ai(messages, api_name, has_image=False):
+def call_ai(messages, api_name, has_image=False, max_retries=3):
     api = APIS.get(api_name, APIS[DEFAULT_API])
 
     if has_image and not api.get("vision", False):
-        return "抱歉，当前模型不支持图片。请用 /model 切换到 sonnet 或 opus。"
+        return "抱歉，当前模型不支持图片。请用 /model 切换到支持图片的模型。"
 
-    try:
-        print(f"调用 API: {api_name}, Model: {api['model']}")
+    for attempt in range(max_retries):
+        try:
+            print(f"调用 API: {api_name}, Model: {api['model']}, 尝试 {attempt + 1}/{max_retries}")
 
-        resp = requests.post(
-            api["url"],
-            headers={
-                "Authorization": f"Bearer {api['key']}",
-                "Content-Type": "application/json"
-            },
-            json={"model": api["model"], "messages": messages},
-            timeout=120
-        )
+            resp = requests.post(
+                api["url"],
+                headers={
+                    "Authorization": f"Bearer {api['key']}",
+                    "Content-Type": "application/json"
+                },
+                json={"model": api["model"], "messages": messages},
+                timeout=120
+            )
 
-        result = resp.json()
+            result = resp.json()
 
-        if "choices" in result:
-            return result["choices"][0]["message"]["content"]
-        elif "error" in result:
-            return f"API 错误: {result['error']}"
-        else:
-            return f"API 异常: {result}"
-    except Exception as e:
-        print(f"异常: {str(e)}")
-        return f"出错了: {str(e)}"
+            if "choices" in result:
+                return result["choices"][0]["message"]["content"]
+            elif "error" in result:
+                error_msg = result.get("error", {})
+                error_str = str(error_msg).lower()
+                
+                # 如果是上游错误或请求失败，重试
+                if "upstream" in error_str or "do_request_failed" in error_str or "timeout" in error_str:
+                    print(f"[API] 上游错误，{2 ** attempt}秒后重试...")
+                    time.sleep(2 ** attempt)  # 指数退避: 1s, 2s, 4s
+                    continue
+                    
+                return f"API 错误: {error_msg}"
+            else:
+                return f"API 异常: {result}"
+                
+        except requests.exceptions.Timeout:
+            print(f"[API] 超时，{2 ** attempt}秒后重试...")
+            time.sleep(2 ** attempt)
+            continue
+        except Exception as e:
+            print(f"异常: {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            return f"出错了: {str(e)}"
+    
+    return "API 请求失败，请稍后重试 😢"
 
 def send_slack(channel, text):
     result = requests.post(
@@ -868,11 +890,7 @@ def add_reaction(channel, ts, emoji):
         if resp.get("ok"):
             print(f"[Reaction] 添加成功: {emoji}")
         else:
-            error = resp.get('error')
-            print(f"[Reaction] 添加失败: {error}")
-            # 如果是 invalid_name 错误，从有效列表中移除（动态学习）
-            if error == "invalid_name" and emoji in VALID_EMOJIS:
-                print(f"[Reaction] 从有效列表移除: {emoji}")
+            print(f"[Reaction] 添加失败: {resp.get('error')}")
     except Exception as e:
         print(f"[Reaction] 出错: {e}")
 
