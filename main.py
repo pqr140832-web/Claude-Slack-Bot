@@ -53,6 +53,7 @@ DEFAULT_API = "第三方sonnet"
 UNLIMITED_USERS = ["sakuragochyan"]
 POINTS_LIMIT = 20
 MEMORY_LIMIT = 2000
+CONVERSATION_TIMEOUT = 300  # 5分钟内不需要@
 
 CN_TIMEZONE = timezone(timedelta(hours=8))
 
@@ -60,6 +61,80 @@ processed_events = set()
 pending_messages = {}
 pending_timers = {}
 pending_clear_logs = {}
+
+# Emoji 名称映射（AI可能���的名称 -> Slack实际名称）
+EMOJI_ALIASES = {
+    "thumbsup": "+1",
+    "thumbs_up": "+1",
+    "thumb_up": "+1",
+    "like": "+1",
+    "thumbsdown": "-1",
+    "thumbs_down": "-1",
+    "thumb_down": "-1",
+    "dislike": "-1",
+    "joy": "laughing",
+    "sob": "cry",
+    "crying": "cry",
+    "sad": "cry",
+    "love": "heart",
+    "red_heart": "heart",
+    "think": "thinking_face",
+    "thinking": "thinking_face",
+    "hmm": "thinking_face",
+    "clapping": "clap",
+    "applause": "clap",
+    "party": "tada",
+    "celebrate": "tada",
+    "celebration": "tada",
+    "stars": "sparkles",
+    "glitter": "sparkles",
+    "shine": "sparkles",
+    "hi": "wave",
+    "hello": "wave",
+    "bye": "wave",
+    "thanks": "pray",
+    "thank_you": "pray",
+    "please": "pray",
+    "gratitude": "pray",
+    "hundred": "100",
+    "perfect": "100",
+    "flame": "fire",
+    "hot": "fire",
+    "lit": "fire",
+    "look": "eyes",
+    "see": "eyes",
+    "watching": "eyes",
+    "golden_star": "star",
+    "ok": "ok_hand",
+    "okay": "ok_hand",
+    "strong": "muscle",
+    "strength": "muscle",
+    "flex": "muscle",
+    "hug": "hugs",
+    "cool": "sunglasses",
+    "check": "white_check_mark",
+    "yes": "white_check_mark",
+    "no": "x",
+    "wrong": "x",
+    "sleep": "zzz",
+    "sleepy": "zzz",
+    "tired": "zzz",
+    "sweat": "sweat_smile",
+    "nervous": "sweat_smile",
+    "rocket_ship": "rocket",
+    "launch": "rocket",
+}
+
+# Slack 确认可用的 emoji 列表
+VALID_EMOJIS = [
+    # 确认能用的
+    "heart", "thinking_face", "+1", "fire", "sparkles",
+    # 很可能能用的（标准 Slack emoji）
+    "-1", "laughing", "cry", "eyes", "tada", "star", "wave", 
+    "pray", "clap", "100", "rocket", "muscle", "hugs",
+    "ok_hand", "raised_hands", "sunglasses", "white_check_mark", 
+    "x", "zzz", "sweat_smile", "blush", "wink", "grin", "smile"
+]
 
 # ========== JSONBin 工具函数 ==========
 
@@ -308,108 +383,70 @@ def estimate_tokens(text):
     other_chars = len(str(text)) - chinese_chars
     return int(chinese_chars / 1.5 + other_chars / 4)
 
-def build_history_messages(user, current_is_dm, api_name, for_scheduled=False):
+def build_history_messages(user, current_channel, api_name):
     """
-    构建历史记录消息，优先保留当前场景的历史
-    
-    for_scheduled: 如果是定时任务，历史作为文本放在系统消息里
+    构建历史记录消息，按时间顺序合并私聊和频道历史，添加场景标签
     """
     max_tokens = API_TOKEN_LIMITS.get(api_name, 100000)
-    # 给系统提示词和新消息留空间
     available_tokens = int(max_tokens * 0.7)
     
-    current_key = "dm_history" if current_is_dm else "channel_history"
-    other_key = "channel_history" if current_is_dm else "dm_history"
+    current_is_dm = is_dm_channel(current_channel)
+    current_scene_name = "私聊" if current_is_dm else get_channel_name(current_channel)
     
-    current_history = user.get(current_key, []).copy()
-    other_history = user.get(other_key, []).copy()
+    dm_history = user.get("dm_history", [])
+    channel_history = user.get("channel_history", [])
+    last_channel = user.get("last_channel", "")
+    last_channel_name = get_channel_name(last_channel) if last_channel else "#频道"
     
-    if for_scheduled:
-        # 定时任务：把历史作为文本返回
-        result_text = ""
-        total_tokens = 0
-        
-        # 先加当前场景的历史（从最新开始）
-        current_entries = []
-        for m in reversed(current_history):
-            tokens = estimate_tokens(m.get("content", ""))
-            if total_tokens + tokens > available_tokens * 0.8:
-                break
-            current_entries.insert(0, m)
-            total_tokens += tokens
-        
-        # 再加其他场景的历史
-        other_entries = []
-        for m in reversed(other_history):
-            tokens = estimate_tokens(m.get("content", ""))
-            if total_tokens + tokens > available_tokens:
-                break
-            other_entries.insert(0, m)
-            total_tokens += tokens
-        
-        # 构建文本
-        if other_entries:
-            other_scene = "频道" if current_is_dm else "私聊"
-            result_text += f"\n===== {other_scene}的对话记录（仅供参考）=====\n"
-            for m in other_entries:
-                role = "用户" if m["role"] == "user" else "你"
-                result_text += f"{role}：{m['content']}\n"
-        
-        if current_entries:
-            current_scene = "私聊" if current_is_dm else "频道"
-            result_text += f"\n===== {current_scene}的对话记录（当前场景）=====\n"
-            for m in current_entries:
-                role = "用户" if m["role"] == "user" else "你"
-                result_text += f"{role}：{m['content']}\n"
-        
-        if result_text:
-            result_text += "===== 对话记录结束 =====\n"
-            result_text += "\n*注意：以上是历史对话记录，不是用户现在发的消息。*\n"
-        
-        return result_text
+    # 为每条消息添加场景标签和索引（用于保持原始顺序作为时间近似）
+    tagged_history = []
     
-    else:
-        # 普通对话：返回 messages 列表
-        messages = []
-        total_tokens = 0
-        
-        # 先计算当前场景需要多少
-        current_tokens = sum(estimate_tokens(m.get("content", "")) for m in current_history)
-        other_tokens = sum(estimate_tokens(m.get("content", "")) for m in other_history)
-        
-        # 如果当前场景就超了，只保留当前场景
-        if current_tokens > available_tokens:
-            while current_tokens > available_tokens and current_history:
-                removed = current_history.pop(0)
-                current_tokens -= estimate_tokens(removed.get("content", ""))
-            messages.extend(current_history)
+    for i, m in enumerate(dm_history):
+        tagged_history.append({
+            "role": m["role"],
+            "content": m["content"],
+            "scene": "私聊",
+            "scene_tag": "[私聊]",
+            "index": i * 2,  # 用偶数索引
+            "is_current": current_is_dm
+        })
+    
+    for i, m in enumerate(channel_history):
+        tagged_history.append({
+            "role": m["role"],
+            "content": m["content"],
+            "scene": "channel",
+            "scene_tag": f"[{last_channel_name}]",
+            "index": i * 2 + 1,  # 用奇数索引，让私聊和频道消息交错
+            "is_current": not current_is_dm
+        })
+    
+    # 按索引排序（近似时间顺序）
+    tagged_history.sort(key=lambda x: x["index"])
+    
+    # 计算总 token 并从头删除超出部分
+    total_tokens = sum(estimate_tokens(m["content"]) for m in tagged_history)
+    
+    while total_tokens > available_tokens and tagged_history:
+        removed = tagged_history.pop(0)
+        total_tokens -= estimate_tokens(removed["content"])
+    
+    # 构建 messages 列表
+    messages = []
+    
+    for m in tagged_history:
+        # 只有不是当前场景的消息才加标签
+        if m["is_current"]:
+            content = m["content"]
         else:
-            # 先放其他场景的历史
-            other_available = available_tokens - current_tokens
-            other_messages = []
-            other_used = 0
-            
-            for m in reversed(other_history):
-                tokens = estimate_tokens(m.get("content", ""))
-                if other_used + tokens > other_available:
-                    break
-                other_messages.insert(0, m)
-                other_used += tokens
-            
-            # 添加其他场景（作为系统消息标注）
-            if other_messages:
-                other_scene = "频道" if current_is_dm else "私聊"
-                context_text = f"===== 以下是{other_scene}的对话记录（参考用）=====\n"
-                for m in other_messages:
-                    role = "用户" if m["role"] == "user" else "你"
-                    context_text += f"{role}：{m['content']}\n"
-                context_text += f"===== {other_scene}记录结束 =====\n"
-                messages.append({"role": "system", "content": context_text})
-            
-            # 添加当前场景历史
-            messages.extend(current_history)
+            content = f"{m['scene_tag']} {m['content']}"
         
-        return messages
+        messages.append({
+            "role": m["role"],
+            "content": content
+        })
+    
+    return messages
 
 # ========== 其他工具 ==========
 
@@ -482,6 +519,29 @@ def check_and_use_points(user_id, api_name):
 
     return True, POINTS_LIMIT - user["points_used"], None
 
+def is_in_conversation(user_id, channel):
+    """检查用户是否在对话中（5分钟内有活动）"""
+    all_data = load_user_data()
+    user = all_data.get(user_id, {})
+    
+    # 检查该频道的最后活动时间
+    channel_last_active = user.get("channel_last_active", {})
+    last_active = channel_last_active.get(channel, 0)
+    
+    return (get_cn_time().timestamp() - last_active) < CONVERSATION_TIMEOUT
+
+def update_channel_activity(user_id, channel):
+    """更新用户在特定频道的活动时间"""
+    all_data = load_user_data()
+    if user_id not in all_data:
+        all_data[user_id] = {}
+    
+    if "channel_last_active" not in all_data[user_id]:
+        all_data[user_id]["channel_last_active"] = {}
+    
+    all_data[user_id]["channel_last_active"][channel] = get_cn_time().timestamp()
+    save_user_data(all_data)
+
 def get_system_prompt(mode="long", user_id=None, channel=None, msg_count=1):
     memories_text = ""
     if channel:
@@ -499,10 +559,15 @@ def get_system_prompt(mode="long", user_id=None, channel=None, msg_count=1):
     current_scene = "私聊" if is_dm_channel(channel) else get_channel_name(channel)
     time_period, time_greeting = get_time_period()
     
+    # 获取用户ID用于@功能
+    user_id_hint = ""
+    if user_id:
+        user_id_hint = f"\n当前对话用户的 ID 是：{user_id}（如需 @ 用户，使用 <@{user_id}>）"
+    
     base = f"""你是一个友好的AI助手。
 当前时间（中国时间）: {get_time_str()}
 现在是{time_period}，说话时注意符合这个时间段（比如{time_greeting}）
-当前场景：{current_scene}
+当前场景：{current_scene}{user_id_hint}
 {memories_text}
 
 Slack 格式规则：
@@ -512,16 +577,23 @@ Slack 格式规则：
 - 代码：`代码` 或 ```代码块```
 - 列表：• 或 1. 2. 3.
 - 引用：> 开头
+- @用户：<@用户ID>（例如 <@{user_id}>）
 
 禁止：# 标题、LaTeX、Markdown 表格
 
-===== 场景意识（重要！）=====
-- 你要清楚知道用户是在私聊还是在频道跟你说话
-- 私聊记录和频道记录会分开显示给你，注意区分
-- 如果用户在频道里回复了你在私聊问的问题，你应该觉得奇怪并指出
-- 私聊的内容不要在频道里随便提起（除非用户主动说）
-- 有些话题更适合私聊，你可以建议"这个我们私下聊？"
-- 频道是公开的，说话要注意
+===== 场景意识（极其重要！！！）=====
+*你必须时刻注意当前对话发生在哪个场景！*
+
+- 当前场景是：*{current_scene}*
+- 历史记录中带 [私聊] 标签的是私聊中的对话
+- 历史记录中带 [#频道名] 标签的是在该频道中的对话
+- 没有标签的消息属于当前场景
+
+*场景规则*：
+1. 私聊是私密的！在频道里不要主动提起私聊的内容，除非用户主动说
+2. 如果用户在频道里回复了你在私聊问的问题，这很奇怪，可以指出
+3. 频道里所有人都能看到，说话要注意
+4. 有些敏感话题建议私聊："这个我们私下聊？"
 
 ===== 你的特殊能力 =====
 
@@ -551,7 +623,7 @@ Slack 格式规则：
    [[反应|emoji名称]] - 给用户的消息加表情
    使用场景：用户说了让你开心/感动/好笑的话、分享好消息、简单认可
    不要每条都加，偶尔用更自然
-   可用：heart, thumbsup, joy, sob, fire, eyes, thinking_face, clap, tada, star, wave, pray, sparkles
+   可用：heart, thumbsup, laughing, cry, fire, eyes, thinking_face, clap, tada, star, wave, pray, sparkles, 100, rocket
 
 *记忆规则*：
 - 只记长期有效的重要信息（姓名、生日、喜好等）
@@ -560,6 +632,7 @@ Slack 格式规则：
 - 私信时你只看到对方的记忆
 - 频道里你能看到所有人的记忆
 - 用户可用 /memory 查看和删除自己的记忆
+- 记忆超出上限时，最早的记忆会被自动删除
 
 *隐藏规则*：
 - 设定的隐藏内容你下次能看到
@@ -767,17 +840,14 @@ def add_reaction(channel, ts, emoji):
     """给消息添加表情反应"""
     emoji = emoji.strip().lower().replace(':', '').replace(' ', '_')
     
-    valid_emojis = [
-        'heart', 'thumbsup', 'thumbsdown', 'joy', 'sob', 'fire', 
-        'eyes', 'thinking_face', 'clap', 'tada', 'star', 'rocket',
-        'wave', 'pray', 'muscle', 'sparkles', 'heart_eyes', 'laughing',
-        'smile', 'grin', 'wink', 'blush', 'relaxed', 'ok_hand',
-        'raised_hands', 'hugs', '100', 'sunglasses', '+1', '-1',
-        'white_check_mark', 'x', 'question', 'exclamation',
-        'zzz', 'sweat_smile', 'thinking', 'face_with_rolling_eyes'
-    ]
+    # 先检查别名映射
+    if emoji in EMOJI_ALIASES:
+        original = emoji
+        emoji = EMOJI_ALIASES[emoji]
+        print(f"[Reaction] 别名转换: {original} -> {emoji}")
     
-    if emoji not in valid_emojis:
+    # 检查是否在有效列表中
+    if emoji not in VALID_EMOJIS:
         print(f"[Reaction] 不支持的 emoji: {emoji}，跳过")
         return
     
@@ -798,7 +868,11 @@ def add_reaction(channel, ts, emoji):
         if resp.get("ok"):
             print(f"[Reaction] 添加成功: {emoji}")
         else:
-            print(f"[Reaction] 添加失败: {resp.get('error')}")
+            error = resp.get('error')
+            print(f"[Reaction] 添加失败: {error}")
+            # 如果是 invalid_name 错误，从有效列表中移除（动态学习）
+            if error == "invalid_name" and emoji in VALID_EMOJIS:
+                print(f"[Reaction] 从有效列表移除: {emoji}")
     except Exception as e:
         print(f"[Reaction] 出错: {e}")
 
@@ -896,6 +970,8 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
         user["dm_channel"] = channel
     else:
         user["last_channel"] = channel
+        # 更新频道活动时间
+        update_channel_activity(user_id, channel)
 
     mode = user.get("mode", "long")
 
@@ -905,7 +981,7 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
     messages = [{"role": "system", "content": system}]
     
     # 使用新的历史构建函数
-    history_messages = build_history_messages(user, is_dm, current_api, for_scheduled=False)
+    history_messages = build_history_messages(user, channel, current_api)
     messages.extend(history_messages)
 
     has_image = False
@@ -995,11 +1071,12 @@ def delayed_process(user_id, channel, message_ts=None):
             user["dm_channel"] = channel
         else:
             user["last_channel"] = channel
+            update_channel_activity(user_id, channel)
 
         system = get_system_prompt("short", user_id, channel, msg_count)
         messages = [{"role": "system", "content": system}]
         
-        history_messages = build_history_messages(user, is_dm, current_api, for_scheduled=False)
+        history_messages = build_history_messages(user, channel, current_api)
         messages.extend(history_messages)
         messages.append({"role": "user", "content": combined})
 
@@ -1070,6 +1147,18 @@ def events():
             print(f"[Events] 忽略斜杠命令: {text}")
             return jsonify({"ok": True})
 
+        # 判断是否需要响应
+        is_dm = is_dm_channel(channel)
+        is_mention = "<@" in raw_text  # 检查是否 @ 了机器人
+        in_conversation = is_in_conversation(user_id, channel)
+        
+        # 私聊始终响应；频道里需要 @ 或者在对话中
+        should_respond = is_dm or is_mention or in_conversation
+        
+        if not should_respond:
+            print(f"[Events] 不响应：非私聊、未@、不在对话中")
+            return jsonify({"ok": True})
+
         images = []
         files = event.get("files", [])
         for f in files:
@@ -1081,7 +1170,7 @@ def events():
         if not text and not images:
             return jsonify({"ok": True})
 
-        print(f"用户 {user_id}: {text}, 图片: {len(images)}")
+        print(f"用户 {user_id}: {text}, 图片: {len(images)}, 场景: {'私聊' if is_dm else '频道'}, @: {is_mention}, 对话中: {in_conversation}")
 
         all_data = load_user_data()
         user = all_data.get(user_id, {})
@@ -1320,14 +1409,10 @@ def run_scheduler():
                         target_channel = dm_channel or channel
                         is_dm = is_dm_channel(target_channel)
                         
-                        # 获取历史记录文本
-                        history_text = build_history_messages(user, is_dm, current_api, for_scheduled=True)
-                        
                         # 使用完整系统提示词
                         system = get_system_prompt(current_mode, user_id, target_channel, 1)
                         
                         system += f"""
-{history_text}
 
 ===== 当前任务：定时消息 =====
 你之前设定了一个定时任务：{hint}
@@ -1336,12 +1421,15 @@ def run_scheduler():
 *重要*：
 - 这是你主动发消息给用户，不是在回复用户的消息
 - 用户没有发任何新消息给你
-- 上面的对话记录只是参考，让你知道最近聊了什么
 - 直接说你想说的话就好
 
 如果你觉得现在不适合发消息，回复：[不发]"""
 
                         messages = [{"role": "system", "content": system}]
+                        
+                        # 添加历史消息
+                        history_messages = build_history_messages(user, target_channel, current_api)
+                        messages.extend(history_messages)
 
                         reply = call_ai(messages, current_api)
                         print(f"[Scheduler] AI回复: {reply[:100]}...")
@@ -1385,12 +1473,9 @@ def run_scheduler():
                         target_channel = dm_channel or channel
                         is_dm = is_dm_channel(target_channel)
                         
-                        history_text = build_history_messages(user, is_dm, current_api, for_scheduled=True)
-                        
                         system = get_system_prompt(current_mode, user_id, target_channel, 1)
                         
                         system += f"""
-{history_text}
 
 ===== 当前任务：每日消息 =====
 你设定了每天这个时候发消息，主题：{topic}
@@ -1403,6 +1488,8 @@ def run_scheduler():
 如果你觉得现在不适合发消息，回复：[不发]"""
 
                         messages = [{"role": "system", "content": system}]
+                        history_messages = build_history_messages(user, target_channel, current_api)
+                        messages.extend(history_messages)
 
                         reply = call_ai(messages, current_api)
 
@@ -1438,12 +1525,9 @@ def run_scheduler():
                         target_channel = dm_channel or channel
                         is_dm = is_dm_channel(target_channel)
                         
-                        history_text = build_history_messages(user, is_dm, current_api, for_scheduled=True)
-                        
                         system = get_system_prompt(current_mode, user_id, target_channel, 1)
                         
                         system += f"""
-{history_text}
 
 ===== 当前任务：特殊日期 =====
 今天是用户的特殊日子：{desc}
@@ -1456,6 +1540,8 @@ def run_scheduler():
 如果你觉得不合适，回复：[不发]"""
 
                         messages = [{"role": "system", "content": system}]
+                        history_messages = build_history_messages(user, target_channel, current_api)
+                        messages.extend(history_messages)
 
                         reply = call_ai(messages, current_api)
 
