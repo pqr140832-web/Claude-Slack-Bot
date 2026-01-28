@@ -396,6 +396,9 @@ def build_history_messages(user, current_channel, api_name):
     tagged_history = []
     
     for i, m in enumerate(dm_history):
+        # 过滤空消息
+        if not m.get("content"):
+            continue
         tagged_history.append({
             "role": m["role"],
             "content": m["content"],
@@ -406,6 +409,9 @@ def build_history_messages(user, current_channel, api_name):
         })
     
     for i, m in enumerate(channel_history):
+        # 过滤空消息
+        if not m.get("content"):
+            continue
         tagged_history.append({
             "role": m["role"],
             "content": m["content"],
@@ -515,18 +521,10 @@ def is_in_conversation(user_id, channel):
     channel_last_active = user.get("channel_last_active", {})
     last_active = channel_last_active.get(channel, 0)
     
-    return (get_cn_time().timestamp() - last_active) < CONVERSATION_TIMEOUT
-
-def update_channel_activity(user_id, channel):
-    all_data = load_user_data()
-    if user_id not in all_data:
-        all_data[user_id] = {}
+    in_conv = (get_cn_time().timestamp() - last_active) < CONVERSATION_TIMEOUT
+    print(f"[Debug] is_in_conversation: channel={channel}, last_active={last_active}, now={get_cn_time().timestamp()}, result={in_conv}")
     
-    if "channel_last_active" not in all_data[user_id]:
-        all_data[user_id]["channel_last_active"] = {}
-    
-    all_data[user_id]["channel_last_active"][channel] = get_cn_time().timestamp()
-    save_user_data(all_data)
+    return in_conv
 
 def get_system_prompt(mode="long", user_id=None, channel=None, msg_count=1):
     memories_text = ""
@@ -625,7 +623,7 @@ Slack 格式规则：
 - 当你想在某个时间给用户发消息（不一定是提醒），也可以设定时消息
 - 记录特殊日期并非硬性规定，只要你认为需要记录的日期都可以是特殊日期
 
-*时间理解规则*（设置定时消息时必须遵守）：
+*时间理解规则*（���置定时消息时必须遵守）：
 - 用户说的时间通常是12小时制，需要根据当前时间判断
 - 如果时间有歧义，先询问确认
 - 如果用户明确说了上午/下午/晚上，就不需要询问
@@ -718,7 +716,7 @@ def parse_hidden_commands(reply, user_id, current_channel=None):
         reply = reply.replace(f"[[每日|{time_str}|{topic}]]", "")
         has_hidden = True
 
-    mems_with_user = re.findall(r'\[\[记��\|([A-Z0-9]+)\|(.+?)\]\]', reply)
+    mems_with_user = re.findall(r'\[\[记忆\|([A-Z0-9]+)\|(.+?)\]\]', reply)
     for mem_user_id, content in mems_with_user:
         add_memory(mem_user_id, content)
         reply = reply.replace(f"[[记忆|{mem_user_id}|{content}]]", "")
@@ -956,7 +954,11 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
         user["dm_channel"] = channel
     else:
         user["last_channel"] = channel
-        update_channel_activity(user_id, channel)
+        # 直接在这里更新频道活动时间，不调用单独的函数
+        if "channel_last_active" not in user:
+            user["channel_last_active"] = {}
+        user["channel_last_active"][channel] = get_cn_time().timestamp()
+        print(f"[Debug] 更新频道活动时间: channel={channel}, time={user['channel_last_active'][channel]}")
 
     mode = user.get("mode", "long")
 
@@ -999,8 +1001,12 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
     current_history_key = "dm_history" if is_dm else "channel_history"
     if current_history_key not in user:
         user[current_history_key] = []
-    user[current_history_key].append({"role": "user", "content": text})
-    user[current_history_key].append({"role": "assistant", "content": original_reply})
+    
+    # 只保存非空内容
+    if text:
+        user[current_history_key].append({"role": "user", "content": text})
+    if original_reply:
+        user[current_history_key].append({"role": "assistant", "content": original_reply})
 
     all_data[user_id] = user
     save_user_data(all_data)
@@ -1055,7 +1061,11 @@ def delayed_process(user_id, channel, message_ts=None):
             user["dm_channel"] = channel
         else:
             user["last_channel"] = channel
-            update_channel_activity(user_id, channel)
+            # 直接在这里更新频道活动时间
+            if "channel_last_active" not in user:
+                user["channel_last_active"] = {}
+            user["channel_last_active"][channel] = get_cn_time().timestamp()
+            print(f"[Debug] 更新频道活动时间: channel={channel}, time={user['channel_last_active'][channel]}")
 
         system = get_system_prompt("short", user_id, channel, msg_count)
         messages = [{"role": "system", "content": system}]
@@ -1073,8 +1083,13 @@ def delayed_process(user_id, channel, message_ts=None):
         current_history_key = "dm_history" if is_dm else "channel_history"
         if current_history_key not in user:
             user[current_history_key] = []
-        user[current_history_key].append({"role": "user", "content": combined})
-        user[current_history_key].append({"role": "assistant", "content": original_reply})
+        
+        # 只保存非空内容
+        if combined:
+            user[current_history_key].append({"role": "user", "content": combined})
+        if original_reply:
+            user[current_history_key].append({"role": "assistant", "content": original_reply})
+        
         user["last_active"] = get_cn_time().timestamp()
 
         all_data[user_id] = user
@@ -1117,13 +1132,10 @@ def events():
     event_type = event.get("type")
     subtype = event.get("subtype")
 
-    # 处理消息事件（包括文件分享）
     if event_type in ["app_mention", "message"]:
-        # 忽略 bot 自己的消息
         if event.get("bot_id"):
             return jsonify({"ok": True})
         
-        # 允许 file_share subtype，过滤其他 subtype
         if subtype and subtype not in ["file_share"]:
             return jsonify({"ok": True})
 
@@ -1147,7 +1159,6 @@ def events():
             print(f"[Events] 不响应：非私聊、未@、不在对话中")
             return jsonify({"ok": True})
 
-        # 提取图片
         images = []
         files = event.get("files", [])
         for f in files:
@@ -1166,7 +1177,6 @@ def events():
         user = all_data.get(user_id, {})
         mode = user.get("mode", "long")
 
-        # 有图片时不用短句模式的等待逻辑
         if mode == "short" and not images:
             if user_id not in pending_messages:
                 pending_messages[user_id] = []
@@ -1437,7 +1447,8 @@ def run_scheduler():
                                 current_history_key = "dm_history" if is_dm else "channel_history"
                                 if current_history_key not in user:
                                     user[current_history_key] = []
-                                user[current_history_key].append({"role": "assistant", "content": original_reply})
+                                if original_reply:
+                                    user[current_history_key].append({"role": "assistant", "content": original_reply})
                                 
                                 execute_extra_actions(extra_actions, user_id, target_channel, None, current_mode)
                                 
@@ -1495,7 +1506,8 @@ def run_scheduler():
                                 current_history_key = "dm_history" if is_dm else "channel_history"
                                 if current_history_key not in user:
                                     user[current_history_key] = []
-                                user[current_history_key].append({"role": "assistant", "content": original_reply})
+                                if original_reply:
+                                    user[current_history_key].append({"role": "assistant", "content": original_reply})
                                 
                                 execute_extra_actions(extra_actions, user_id, target_channel, None, current_mode)
                                 
@@ -1546,7 +1558,8 @@ def run_scheduler():
                                 current_history_key = "dm_history" if is_dm else "channel_history"
                                 if current_history_key not in user:
                                     user[current_history_key] = []
-                                user[current_history_key].append({"role": "assistant", "content": original_reply})
+                                if original_reply:
+                                    user[current_history_key].append({"role": "assistant", "content": original_reply})
                                 
                                 execute_extra_actions(extra_actions, user_id, target_channel, None, current_mode)
                                 
