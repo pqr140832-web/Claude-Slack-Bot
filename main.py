@@ -4,10 +4,16 @@ import re
 from datetime import datetime, timezone, timedelta
 import json
 import os
-import random
 import threading
 import time
 import base64
+import io
+
+# 文件解析库
+import PyPDF2
+import docx
+import openpyxl
+import pptx
 
 app = Flask(__name__)
 
@@ -62,6 +68,7 @@ UNLIMITED_USERS = ["sakuragochyan"]
 POINTS_LIMIT = 20
 MEMORY_LIMIT = 2000
 CONVERSATION_TIMEOUT = 300
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
 CN_TIMEZONE = timezone(timedelta(hours=8))
 
@@ -135,6 +142,183 @@ VALID_EMOJIS = [
     "raised_hands", "sunglasses", "white_check_mark", "x", "zzz", 
     "sweat_smile", "blush", "wink", "grin", "smile"
 ]
+
+# 支持的文本文件扩展名
+TEXT_EXTENSIONS = ['.txt', '.md', '.py', '.js', '.ts', '.html', '.css', '.json', '.xml', '.yaml', '.yml', '.csv', '.log', '.sh', '.bash', '.c', '.cpp', '.h', '.java', '.rb', '.php', '.go', '.rs', '.swift', '.kt', '.r', '.sql']
+
+# ========== 文件解析函数 ==========
+
+def download_file(url):
+    """下载文件内容"""
+    try:
+        resp = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+            timeout=30
+        )
+        if resp.status_code == 200:
+            return resp.content
+    except Exception as e:
+        print(f"[File] 下载失败: {e}")
+    return None
+
+def extract_pdf_text(content):
+    """解析 PDF 文件"""
+    try:
+        pdf = PyPDF2.PdfReader(io.BytesIO(content))
+        text = ""
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+        return text.strip() if text.strip() else None
+    except Exception as e:
+        print(f"[File] PDF 解析失败: {e}")
+        return None
+
+def extract_docx_text(content):
+    """解析 Word 文件"""
+    try:
+        doc = docx.Document(io.BytesIO(content))
+        text = ""
+        for para in doc.paragraphs:
+            text += para.text + "\n"
+        return text.strip() if text.strip() else None
+    except Exception as e:
+        print(f"[File] Word 解析失败: {e}")
+        return None
+
+def extract_xlsx_text(content):
+    """解析 Excel 文件"""
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        text = ""
+        for sheet in wb.sheetnames:
+            ws = wb[sheet]
+            text += f"[工作表: {sheet}]\n"
+            for row in ws.iter_rows(values_only=True):
+                row_text = "\t".join([str(cell) if cell is not None else "" for cell in row])
+                if row_text.strip():
+                    text += row_text + "\n"
+            text += "\n"
+        return text.strip() if text.strip() else None
+    except Exception as e:
+        print(f"[File] Excel 解析失败: {e}")
+        return None
+
+def extract_pptx_text(content):
+    """解析 PPT 文件"""
+    try:
+        presentation = pptx.Presentation(io.BytesIO(content))
+        text = ""
+        for i, slide in enumerate(presentation.slides, 1):
+            text += f"[幻灯片 {i}]\n"
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text:
+                    text += shape.text + "\n"
+            text += "\n"
+        return text.strip() if text.strip() else None
+    except Exception as e:
+        print(f"[File] PPT 解析失败: {e}")
+        return None
+
+def extract_text_file(content):
+    """解析纯文本文件"""
+    try:
+        # 尝试不同编码
+        for encoding in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
+            try:
+                return content.decode(encoding)
+            except:
+                continue
+        return None
+    except Exception as e:
+        print(f"[File] 文本解析失败: {e}")
+        return None
+
+def process_file(file_info):
+    """处理单个文件，返回 (类型, 内容描述)"""
+    filename = file_info.get("name", "未知文件")
+    mimetype = file_info.get("mimetype", "")
+    file_size = file_info.get("size", 0)
+    url = file_info.get("url_private")
+    
+    if not url:
+        return None, None
+    
+    # 检查文件大小
+    if file_size > MAX_FILE_SIZE:
+        return "too_large", f"[文件: {filename}]（文件太大，超过 10MB 限制）"
+    
+    # 获取扩展名
+    ext = os.path.splitext(filename)[1].lower()
+    
+    # 图片 - 返回特殊标记
+    if mimetype.startswith("image/"):
+        return "image", url
+    
+    # 下载文件
+    content = download_file(url)
+    if not content:
+        return "error", f"[文件: {filename}]（下载失败）"
+    
+    # PDF
+    if ext == ".pdf" or mimetype == "application/pdf":
+        text = extract_pdf_text(content)
+        if text:
+            return "text", f"[文件: {filename}]\n{text}"
+        else:
+            return "error", f"[文件: {filename}]（PDF 解析失败，可能是扫描件或加密文件）"
+    
+    # Word
+    if ext == ".docx" or mimetype == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        text = extract_docx_text(content)
+        if text:
+            return "text", f"[文件: {filename}]\n{text}"
+        else:
+            return "error", f"[文件: {filename}]（Word 解析失败）"
+    
+    # 旧版 Word
+    if ext == ".doc":
+        return "unsupported", f"[文件: {filename}]（不支持旧版 .doc 格式，请转换为 .docx）"
+    
+    # Excel
+    if ext == ".xlsx" or mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        text = extract_xlsx_text(content)
+        if text:
+            return "text", f"[文件: {filename}]\n{text}"
+        else:
+            return "error", f"[文件: {filename}]（Excel 解析失败）"
+    
+    # 旧版 Excel
+    if ext == ".xls":
+        return "unsupported", f"[文件: {filename}]（不支持旧版 .xls 格式，请转换为 .xlsx）"
+    
+    # PPT
+    if ext == ".pptx" or mimetype == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        text = extract_pptx_text(content)
+        if text:
+            return "text", f"[文件: {filename}]\n{text}"
+        else:
+            return "error", f"[文件: {filename}]（PPT 解析失败）"
+    
+    # 旧版 PPT
+    if ext == ".ppt":
+        return "unsupported", f"[文件: {filename}]（不支持旧版 .ppt 格式，请转换为 .pptx）"
+    
+    # 纯文本文件
+    if ext in TEXT_EXTENSIONS or mimetype.startswith("text/"):
+        text = extract_text_file(content)
+        if text:
+            # 限制文本长度
+            if len(text) > 50000:
+                text = text[:50000] + "\n...(内容过长，已截断)"
+            return "text", f"[文件: {filename}]\n{text}"
+        else:
+            return "error", f"[文件: {filename}]（文本解析失败）"
+    
+    # 其他不支持的格式
+    return "unsupported", f"[文件: {filename}]（不支持此文件格式）"
 
 # ========== JSONBin 工具函数 ==========
 
@@ -396,7 +580,6 @@ def build_history_messages(user, current_channel, api_name):
     tagged_history = []
     
     for i, m in enumerate(dm_history):
-        # 过滤空消息
         if not m.get("content"):
             continue
         tagged_history.append({
@@ -409,7 +592,6 @@ def build_history_messages(user, current_channel, api_name):
         })
     
     for i, m in enumerate(channel_history):
-        # 过滤空消息
         if not m.get("content"):
             continue
         tagged_history.append({
@@ -623,7 +805,7 @@ Slack 格式规则：
 - 当你想在某个时间给用户发消息（不一定是提醒），也可以设定时消息
 - 记录特殊日期并非硬性规定，只要你认为需要记录的日期都可以是特殊日期
 
-*时间理解规则*（���置定时消息时必须遵守）：
+*时间理解规则*（设置定时消息时必须遵守）：
 - 用户说的时间通常是12小时制，需要根据当前时间判断
 - 如果时间有歧义，先询问确认
 - 如果用户明确说了上午/下午/晚上，就不需要询问
@@ -929,7 +1111,7 @@ def check_pending_clear(user_id, channel):
 
 # ========== 处理消息 ==========
 
-def process_message(user_id, channel, text, images=None, message_ts=None, msg_count=1):
+def process_message(user_id, channel, text, files=None, message_ts=None, msg_count=1):
     all_data = load_user_data()
     user = all_data.get(user_id, {
         "dm_history": [],
@@ -954,7 +1136,6 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
         user["dm_channel"] = channel
     else:
         user["last_channel"] = channel
-        # 直接在这里更新频道活动时间，不调用单独的函数
         if "channel_last_active" not in user:
             user["channel_last_active"] = {}
         user["channel_last_active"][channel] = get_cn_time().timestamp()
@@ -962,7 +1143,29 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
 
     mode = user.get("mode", "long")
 
-    log_message(channel, "user", text, username=display_name)
+    # 处理文件
+    images = []
+    file_texts = []
+    
+    if files:
+        for file_info in files:
+            file_type, content = process_file(file_info)
+            if file_type == "image":
+                images.append(content)  # content 是 URL
+                print(f"[File] 发现图片: {file_info.get('name')}")
+            elif file_type == "text":
+                file_texts.append(content)
+                print(f"[File] 解析成功: {file_info.get('name')}")
+            elif content:  # error, unsupported, too_large
+                file_texts.append(content)
+                print(f"[File] {file_type}: {file_info.get('name')}")
+    
+    # 组合消息文本
+    full_text = text
+    if file_texts:
+        full_text = (text + "\n\n" + "\n\n".join(file_texts)).strip()
+
+    log_message(channel, "user", full_text, username=display_name)
 
     system = get_system_prompt(mode, user_id, channel, msg_count)
     messages = [{"role": "system", "content": system}]
@@ -974,8 +1177,8 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
     if images and len(images) > 0:
         has_image = True
         content = []
-        if text:
-            content.append({"type": "text", "text": text})
+        if full_text:
+            content.append({"type": "text", "text": full_text})
         for img_url in images:
             img_data = download_image(img_url)
             if img_data:
@@ -986,9 +1189,9 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
         if content:
             messages.append({"role": "user", "content": content})
         else:
-            messages.append({"role": "user", "content": text or "（图片无法处理）"})
+            messages.append({"role": "user", "content": full_text or "（文件无法处理）"})
     else:
-        messages.append({"role": "user", "content": text})
+        messages.append({"role": "user", "content": full_text})
 
     typing_ts = send_slack(channel, "_Typing..._")
     reply = call_ai(messages, current_api, has_image=has_image)
@@ -1002,9 +1205,8 @@ def process_message(user_id, channel, text, images=None, message_ts=None, msg_co
     if current_history_key not in user:
         user[current_history_key] = []
     
-    # 只保存非空内容
-    if text:
-        user[current_history_key].append({"role": "user", "content": text})
+    if full_text:
+        user[current_history_key].append({"role": "user", "content": full_text})
     if original_reply:
         user[current_history_key].append({"role": "assistant", "content": original_reply})
 
@@ -1061,7 +1263,6 @@ def delayed_process(user_id, channel, message_ts=None):
             user["dm_channel"] = channel
         else:
             user["last_channel"] = channel
-            # 直接在这里更新频道活动时间
             if "channel_last_active" not in user:
                 user["channel_last_active"] = {}
             user["channel_last_active"][channel] = get_cn_time().timestamp()
@@ -1084,7 +1285,6 @@ def delayed_process(user_id, channel, message_ts=None):
         if current_history_key not in user:
             user[current_history_key] = []
         
-        # 只保存非空内容
         if combined:
             user[current_history_key].append({"role": "user", "content": combined})
         if original_reply:
@@ -1159,25 +1359,20 @@ def events():
             print(f"[Events] 不响应：非私聊、未@、不在对话中")
             return jsonify({"ok": True})
 
-        images = []
+        # 获取所有文件
         files = event.get("files", [])
-        for f in files:
-            if f.get("mimetype", "").startswith("image/"):
-                url = f.get("url_private")
-                if url:
-                    images.append(url)
-                    print(f"[Events] 发现图片: {url[:50]}...")
-
-        if not text and not images:
+        
+        if not text and not files:
             return jsonify({"ok": True})
 
-        print(f"用户 {user_id}: {text}, 图片: {len(images)}, 场景: {'私聊' if is_dm else '频道'}, @: {is_mention}, 对话中: {in_conversation}")
+        print(f"用户 {user_id}: {text}, 文件: {len(files)}, 场景: {'私聊' if is_dm else '频道'}, @: {is_mention}, 对话中: {in_conversation}")
 
         all_data = load_user_data()
         user = all_data.get(user_id, {})
         mode = user.get("mode", "long")
 
-        if mode == "short" and not images:
+        # 有文件时不用短句模式的等待逻辑
+        if mode == "short" and not files:
             if user_id not in pending_messages:
                 pending_messages[user_id] = []
             pending_messages[user_id].append(text)
@@ -1189,7 +1384,7 @@ def events():
             timer.start()
             pending_timers[user_id] = timer
         else:
-            threading.Thread(target=process_message, args=[user_id, channel, text, images, message_ts, 1]).start()
+            threading.Thread(target=process_message, args=[user_id, channel, text, files, message_ts, 1]).start()
 
     return jsonify({"ok": True})
 
@@ -1539,9 +1734,7 @@ def run_scheduler():
                         messages = [{"role": "system", "content": system}]
                         history_messages = build_history_messages(user, target_channel, current_api)
                         messages.extend(history_messages)
-
                         reply = call_ai(messages, current_api)
-
                         if "[不发]" not in reply:
                             visible, has_hidden, original_reply, extra_actions = parse_hidden_commands(reply, user_id, target_channel)
                             
@@ -1564,31 +1757,23 @@ def run_scheduler():
                                 execute_extra_actions(extra_actions, user_id, target_channel, None, current_mode)
                                 
                                 print(f"[Scheduler] 已发送特殊日期消息给 {user_id}")
-
                 schedules[user_id] = user_schedules
-
             save_schedules(schedules)
             save_user_data(all_data)
-
         except Exception as e:
             print(f"[Scheduler] 出错: {str(e)}")
             import traceback
             traceback.print_exc()
-
         time.sleep(60)
-
 @app.route("/cron", methods=["GET", "POST"])
 def cron_job():
     return jsonify({"ok": True, "message": "Using background thread scheduler"})
-
 @app.route("/")
 def home():
     return "Bot is running! 🤖"
-
 scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
 scheduler_thread.start()
 print("[Startup] 后台定时任务线程已启动")
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
