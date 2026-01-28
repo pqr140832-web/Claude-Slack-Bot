@@ -1665,7 +1665,7 @@ def commands():
             set_channel_dm_setting(user_id, channel, False)
             return jsonify({"response_type": "ephemeral", "text": "✅ 已关闭私聊记录"})
         
-                return jsonify({"response_type": "ephemeral", "text": "❌ /dmhistory on 或 /dmhistory off"})
+        return jsonify({"response_type": "ephemeral", "text": "❌ /dmhistory on 或 /dmhistory off"})
 
     if cmd == "/points":
         if is_unlimited_user(user_id):
