@@ -32,7 +32,9 @@ API_TOKEN_LIMITS = {
     "opus": 190000,
     "code haiku": 190000,
     "code sonnet": 190000,
-    "code opus": 190000
+    "code opus": 190000,
+    "啾啾sonnet": 190000,
+    "啾啾opus": 190000,
 }
 
 APIS = {
@@ -77,7 +79,21 @@ APIS = {
         "model": "[code]claude-opus-4-5-20251101",
         "vision": True,
         "cost": 10
-    }
+    },
+    "啾啾sonnet": {
+        "url": os.environ.get("API_URL_3"),
+        "key": os.environ.get("API_KEY_3"),
+        "model": "[啾啾]claude-sonnet-4-5-20250929",
+        "vision": True,
+        "cost": 5
+    },
+    "啾啾opus": {
+        "url": os.environ.get("API_URL_3"),
+        "key": os.environ.get("API_KEY_3"),
+        "model": "[啾啾]claude-opus-4-5-20251101",
+        "vision": True,
+        "cost": 10
+    },
 }
 
 DEFAULT_API = "第三方sonnet"
@@ -507,12 +523,13 @@ def build_review_context(user, current_channel, user_message, ai_reply, msg_coun
     all_messages = []
     
     # 私聊历史
-    for m in user.get("dm_history", []):
-        if m.get("content"):
-            all_messages.append({
-                "content": f"[私聊][{'用户' if m['role']=='user' else 'AI'}] {m['content']}",
-                "timestamp": m.get("timestamp", 0)
-            })
+    if "dm_history" in user: # Ensure dm_history exists
+        for m in user.get("dm_history", []):
+            if m.get("content"):
+                all_messages.append({
+                    "content": f"[私聊][{'用户' if m['role']=='user' else 'AI'}] {m['content']}",
+                    "timestamp": m.get("timestamp", 0)
+                })
     
     # 频道历史
     if not is_dm_channel(current_channel):
@@ -617,6 +634,8 @@ AI 有一条回复长度为 {details} 字（超过了 50 字限制）。
             answer = result["choices"][0]["message"]["content"].strip()
             print(f"[AI审查] 类型: {issue_type}, 用户消息数: {msg_count}, 结果: {answer}")
             return "合理" in answer
+        else:
+            print(f"[AI审查] API 返回无 choices: {result.get('error')}")
     except Exception as e:
         print(f"[AI审查] 出错: {e}")
     
@@ -628,8 +647,10 @@ def evaluate_ai_response(user_id, user, current_channel, user_message, reply, ms
     violations: 违规列表
     need_rework: 是否需要返工
     """
+    print(f"[Debug] evaluate_ai_response 被调用: user_id={user_id}, msg_count={msg_count}")
     messages = [m.strip() for m in reply.split("|||") if m.strip()] if "|||" in reply else [reply.strip()]
     reply_count = len(messages)
+    print(f"[Debug] 回复条数: {reply_count}, 限制: {msg_count * 3}")
     violations = []
     need_rework = False
     
@@ -869,6 +890,17 @@ def is_in_conversation(user_id, channel):
     last_active = user.get("channel_last_active", {}).get(channel, 0)
     return (get_cn_time().timestamp() - last_active) < CONVERSATION_TIMEOUT
 
+def activate_channel_conversation(user_id, channel):
+    """激活频道对话状态"""
+    all_data = load_user_data()
+    if user_id not in all_data:
+        all_data[user_id] = {}
+    if "channel_last_active" not in all_data[user_id]:
+        all_data[user_id]["channel_last_active"] = {}
+    all_data[user_id]["channel_last_active"][channel] = get_cn_time().timestamp()
+    save_user_data(all_data)
+    print(f"[Conversation] 激活用户 {user_id} 在频道 {channel} 的对话状态")
+
 # ========== 历史记录构建 ==========
 
 def build_history_messages(user, current_channel, api_name):
@@ -962,13 +994,19 @@ Slack 格式：*粗体* _斜体_ ~删除线~ `代码` ```代码块``` > 引用 <
 - [某人说] 标签 = 频道里其他人说的话
 - 私聊内容不要在频道里主动提起
 
+*重要：你回复时绝对不要加这些标签！*
+- 不要在回复开头加 [私聊]、[频道] 之类的标签
+- 不要在回复开头加 # 号
+- 这些标签是系统用来标记历史消息的，不是你该加的
+- 你的回复直接写内容就好
+
 === 特殊能力 ===
 [[定时|YYYY-MM-DD|HH:MM|内容]] - 定时消息
 [[每日|HH:MM|主题]] - 每日消息
 [[记忆|内容]] 或 [[记忆|用户ID|内容]] - 长期记忆
 [[特殊日期|MM-DD|描述]] - 特殊日期
 [[私聊|内容]] - 发私聊
-[[发到频道|频道名|内容]] - 发到频道
+[[发到频道|频道名|内容]] - 发到频道（频道名不要加#号，比如 [[发到频道|chat|你好]]）
 [[反应|emoji]] - 表情反应
 
 不需要回复时用：[不回]"""
@@ -1188,17 +1226,27 @@ def execute_extra_actions(actions, user_id, channel, msg_ts=None, mode="long"):
                     send_multiple_slack(target, content.split("|||"))
                 else:
                     send_slack(target, content)
+                
+                # AI 发到频道后，激活该频道的对话状态
+                activate_channel_conversation(user_id, target)
+                # 记录到频道消息
+                add_channel_message(target, "BOT", "AI", content, is_bot=True)
         
         elif action["type"] == "reaction" and msg_ts:
             add_reaction(channel, msg_ts, action["emoji"])
 
 def check_pending_clear(user_id, channel):
+    print(f"[PendingClear] 检查 {user_id}, logs={pending_clear_logs}")
     if user_id in pending_clear_logs:
         pending_clear_logs[user_id]["count"] -= 1
-        if pending_clear_logs[user_id]["count"] <= 0:
+        remaining = pending_clear_logs[user_id]["count"]
+        print(f"[PendingClear] 剩余 {remaining} 条")
+        if remaining <= 0:
+            print(f"[PendingClear] 开始清空")
             clear_user_chat_logs(user_id, pending_clear_logs[user_id].get("channel_only"))
             log_message(user_id, channel, None, None, is_reset=True)
             del pending_clear_logs[user_id]
+            print(f"[PendingClear] 清空完成")
 
 # ========== 频道观察 ==========
 
@@ -1211,9 +1259,12 @@ def should_trigger_observation(channel_id):
     return False
 
 def observe_channel(channel_id):
+    print(f"[Observe] 开始观察频道: {channel_id}")
     try:
         msgs = get_recent_channel_messages(channel_id, 10)
+        print(f"[Observe] 获取到 {len(msgs)} 条消息")
         if not msgs:
+            print(f"[Observe] 没有消息，退出")
             return
         
         text = "\n".join([
@@ -1225,8 +1276,8 @@ def observe_channel(channel_id):
         if not members:
             return
         
-        user_data = load_user_data().get(members[0], {})
-        api = user_data.get("api", DEFAULT_API)
+        user_data_template = load_user_data().get(members[0], {})
+        api = user_data_template.get("api", DEFAULT_API)
         
         prompt = f"""你正在观察频道 {get_channel_name(channel_id)}。
 时间：{get_time_str()}
@@ -1258,6 +1309,11 @@ def observe_channel(channel_id):
             else:
                 send_slack(channel_id, reply)
             add_channel_message(channel_id, "BOT", "AI", reply, is_bot=True)
+            
+            # AI 主动发言后，激活频道里所有成员的对话状态
+            for member_id in members:
+                activate_channel_conversation(member_id, channel_id)
+
     except Exception as e:
         print(f"[Observe] 出错: {e}")
 
@@ -1265,6 +1321,7 @@ def observe_channel(channel_id):
 
 def process_message_with_rework(user_id, user, channel, text, api_name, mode, msg_count, typing_ts):
     """处理消息，如果积分到 -10 且违规则返工"""
+    print(f"[Debug] process_message_with_rework: mode={mode}, msg_count={msg_count}")
     
     system = get_system_prompt(mode, user_id, channel, msg_count)
     messages = [{"role": "system", "content": system}]
@@ -1373,6 +1430,7 @@ def process_message(user_id, channel, text, files=None, message_ts=None, msg_cou
         visible, has_hidden, original, extra_actions = parse_hidden_commands(reply, user_id, channel)
         violations = []
     else:
+        print(f"[Debug] 准备调用 process_message_with_rework, mode={mode}")
         visible, has_hidden, original, extra_actions, violations = process_message_with_rework(
             user_id, user, channel, full_text, api, mode, msg_count, typing_ts
         )
@@ -1541,7 +1599,9 @@ def events():
     if not is_dm and not is_mention and not in_conv:
         display_name = get_display_name(user_id)
         add_channel_message(channel, user_id, display_name, text)
+        print(f"[Debug] 频道消息计数: {channel_message_counts.get(channel, 0)}")
         if should_trigger_observation(channel):
+            print(f"[Debug] 触发频道观察: {channel}")
             threading.Thread(target=observe_channel, args=[channel]).start()
         return jsonify({"ok": True})
     
@@ -1576,6 +1636,7 @@ def commands():
 
     if cmd == "/reset":
         def do_reset():
+            print(f"[Reset] 开始重置用户 {user_id}")
             data = load_user_data()
             if user_id in data:
                 if is_dm:
@@ -1588,9 +1649,12 @@ def commands():
                 else:
                     data[user_id].setdefault("channel_reset_times", {})[channel] = get_cn_time().timestamp()
                 save_user_data(data)
+            print(f"[Reset] 重置完成")
         
         threading.Thread(target=do_reset).start()
+        print(f"[Reset] 设置 pending_clear_logs: {user_id}")
         pending_clear_logs[user_id] = {"channel": channel, "count": 5, "channel_only": None if is_dm else channel}
+        print(f"[Reset] pending_clear_logs 现在是: {pending_clear_logs}")
         
         msg = "✅ 已重置所有对话和定时任务！" if is_dm else f"✅ 已重置 {get_channel_name(channel)} 的对话！"
         return jsonify({"response_type": "in_channel", "text": f"{msg}\n📝 聊天记录将在 5 条消息后清空"})
@@ -1765,6 +1829,7 @@ def run_scheduler():
                         
                         messages = [{"role": "system", "content": system}]
                         messages.extend(build_history_messages(user, target_channel, api))
+                        messages.append({"role": "user", "content": "[定时任务触发]"}) # 新增占位符
                         
                         reply = call_ai(messages, api)
                         
@@ -1811,6 +1876,7 @@ def run_scheduler():
                         
                         messages = [{"role": "system", "content": system}]
                         messages.extend(build_history_messages(user, target_channel, api))
+                        messages.append({"role": "user", "content": "[定时任务触发]"}) # 新增占位符
                         
                         reply = call_ai(messages, api)
                         
@@ -1849,6 +1915,7 @@ def run_scheduler():
                         
                         messages = [{"role": "system", "content": system}]
                         messages.extend(build_history_messages(user, target_channel, api))
+                        messages.append({"role": "user", "content": "[定时任务触发]"}) # 新增占位符
                         
                         reply = call_ai(messages, api)
                         
