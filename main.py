@@ -68,11 +68,12 @@ UNLIMITED_USERS = ["sakuragochyan"]
 POINTS_LIMIT = 20
 MEMORY_LIMIT = 2000
 CONVERSATION_TIMEOUT = 300
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_FILE_SIZE = 10 * 1024 * 1024
 
 CN_TIMEZONE = timezone(timedelta(hours=8))
 
 processed_events = set()
+processed_file_events = set()  # 文件事件去重
 pending_messages = {}
 pending_timers = {}
 pending_clear_logs = {}
@@ -143,13 +144,11 @@ VALID_EMOJIS = [
     "sweat_smile", "blush", "wink", "grin", "smile"
 ]
 
-# 支持的文本文件扩展名
 TEXT_EXTENSIONS = ['.txt', '.md', '.py', '.js', '.ts', '.html', '.css', '.json', '.xml', '.yaml', '.yml', '.csv', '.log', '.sh', '.bash', '.c', '.cpp', '.h', '.java', '.rb', '.php', '.go', '.rs', '.swift', '.kt', '.r', '.sql']
 
 # ========== 文件解析函数 ==========
 
 def download_file(url):
-    """下载文件内容"""
     try:
         resp = requests.get(
             url,
@@ -163,7 +162,6 @@ def download_file(url):
     return None
 
 def extract_pdf_text(content):
-    """解析 PDF 文件"""
     try:
         pdf = PyPDF2.PdfReader(io.BytesIO(content))
         text = ""
@@ -177,7 +175,6 @@ def extract_pdf_text(content):
         return None
 
 def extract_docx_text(content):
-    """解析 Word 文件"""
     try:
         doc = docx.Document(io.BytesIO(content))
         text = ""
@@ -189,7 +186,6 @@ def extract_docx_text(content):
         return None
 
 def extract_xlsx_text(content):
-    """解析 Excel 文件"""
     try:
         wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
         text = ""
@@ -207,7 +203,6 @@ def extract_xlsx_text(content):
         return None
 
 def extract_pptx_text(content):
-    """解析 PPT 文件"""
     try:
         presentation = pptx.Presentation(io.BytesIO(content))
         text = ""
@@ -223,9 +218,7 @@ def extract_pptx_text(content):
         return None
 
 def extract_text_file(content):
-    """解析纯文本文件"""
     try:
-        # 尝试不同编码
         for encoding in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
             try:
                 return content.decode(encoding)
@@ -237,7 +230,6 @@ def extract_text_file(content):
         return None
 
 def process_file(file_info):
-    """处理单个文件，返回 (类型, 内容描述)"""
     filename = file_info.get("name", "未知文件")
     mimetype = file_info.get("mimetype", "")
     file_size = file_info.get("size", 0)
@@ -246,23 +238,18 @@ def process_file(file_info):
     if not url:
         return None, None
     
-    # 检查文件大小
     if file_size > MAX_FILE_SIZE:
         return "too_large", f"[文件: {filename}]（文件太大，超过 10MB 限制）"
     
-    # 获取扩展名
     ext = os.path.splitext(filename)[1].lower()
     
-    # 图片 - 返回特殊标记
     if mimetype.startswith("image/"):
         return "image", url
     
-    # 下载文件
     content = download_file(url)
     if not content:
         return "error", f"[文件: {filename}]（下载失败）"
     
-    # PDF
     if ext == ".pdf" or mimetype == "application/pdf":
         text = extract_pdf_text(content)
         if text:
@@ -270,7 +257,6 @@ def process_file(file_info):
         else:
             return "error", f"[文件: {filename}]（PDF 解析失败，可能是扫描件或加密文件）"
     
-    # Word
     if ext == ".docx" or mimetype == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         text = extract_docx_text(content)
         if text:
@@ -278,11 +264,9 @@ def process_file(file_info):
         else:
             return "error", f"[文件: {filename}]（Word 解析失败）"
     
-    # 旧版 Word
     if ext == ".doc":
         return "unsupported", f"[文件: {filename}]（不支持旧版 .doc 格式，请转换为 .docx）"
     
-    # Excel
     if ext == ".xlsx" or mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
         text = extract_xlsx_text(content)
         if text:
@@ -290,11 +274,9 @@ def process_file(file_info):
         else:
             return "error", f"[文件: {filename}]（Excel 解析失败）"
     
-    # 旧版 Excel
     if ext == ".xls":
         return "unsupported", f"[文件: {filename}]（不支持旧版 .xls 格式，请转换为 .xlsx）"
     
-    # PPT
     if ext == ".pptx" or mimetype == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
         text = extract_pptx_text(content)
         if text:
@@ -302,22 +284,18 @@ def process_file(file_info):
         else:
             return "error", f"[文件: {filename}]（PPT 解析失败）"
     
-    # 旧版 PPT
     if ext == ".ppt":
         return "unsupported", f"[文件: {filename}]（不支持旧版 .ppt 格式，请转换为 .pptx）"
     
-    # 纯文本文件
     if ext in TEXT_EXTENSIONS or mimetype.startswith("text/"):
         text = extract_text_file(content)
         if text:
-            # 限制文本长度
             if len(text) > 50000:
                 text = text[:50000] + "\n...(内容过长，已截断)"
             return "text", f"[文件: {filename}]\n{text}"
         else:
             return "error", f"[文件: {filename}]（文本解析失败）"
     
-    # 其他不支持的格式
     return "unsupported", f"[文件: {filename}]（不支持此文件格式）"
 
 # ========== JSONBin 工具函数 ==========
@@ -362,6 +340,10 @@ def get_time_str():
     now = get_cn_time()
     return now.strftime("%Y年%m月%d日 %H:%M:%S 星期") + weekdays[now.weekday()]
 
+def get_timestamp():
+    """获取用于排序的时间戳字符串"""
+    return get_cn_time().strftime("%Y-%m-%d %H:%M:%S")
+
 def get_time_period():
     hour = get_cn_time().hour
     if 5 <= hour < 9:
@@ -391,7 +373,7 @@ def load_schedules():
 def save_schedules(data):
     jsonbin_save(JSONBIN_SCHEDULES, data)
 
-# ========== 聊天记录 ==========
+# ========== 聊天记录（按用户存储，时间顺序）==========
 
 def load_chat_logs():
     return jsonbin_load(JSONBIN_CHAT_LOGS, {})
@@ -399,22 +381,26 @@ def load_chat_logs():
 def save_chat_logs(data):
     jsonbin_save(JSONBIN_CHAT_LOGS, data)
 
-def log_message(channel, role, content, username=None, model=None, is_reset=False, hidden=False):
+def log_message(user_id, channel, role, content, username=None, model=None, is_reset=False, hidden=False):
+    """记录消息到用户的聊天记录（按时间顺序）"""
     try:
         logs = load_chat_logs()
-        if channel not in logs:
-            logs[channel] = []
+        if user_id not in logs:
+            logs[user_id] = []
         
-        timestamp = get_time_str()
+        timestamp = get_timestamp()
+        scene = "私聊" if is_dm_channel(channel) else get_channel_name(channel)
         
         if is_reset:
-            logs[channel].append({
+            logs[user_id].append({
                 "type": "reset",
-                "time": timestamp
+                "time": timestamp,
+                "scene": scene
             })
         else:
             entry = {
                 "time": timestamp,
+                "scene": scene,
                 "role": role,
                 "content": content,
                 "hidden": hidden
@@ -423,19 +409,21 @@ def log_message(channel, role, content, username=None, model=None, is_reset=Fals
                 entry["username"] = username or "未知"
             else:
                 entry["model"] = model or "未知"
-            logs[channel].append(entry)
+            logs[user_id].append(entry)
         
         save_chat_logs(logs)
     except Exception as e:
         print(f"log_message 出错: {e}")
 
-def clear_chat_logs(channel):
+def clear_user_chat_logs(user_id):
+    """清除用户的所有聊天记录"""
     try:
         logs = load_chat_logs()
-        logs[channel] = []
+        logs[user_id] = []
         save_chat_logs(logs)
+        print(f"[ChatLogs] 用户 {user_id} 聊天记录已清空")
     except Exception as e:
-        print(f"clear_chat_logs 出错: {e}")
+        print(f"clear_user_chat_logs 出错: {e}")
 
 # ========== 记忆系统 ==========
 
@@ -570,35 +558,35 @@ def build_history_messages(user, current_channel, api_name):
     available_tokens = int(max_tokens * 0.7)
     
     current_is_dm = is_dm_channel(current_channel)
-    current_scene_name = "私聊" if current_is_dm else get_channel_name(current_channel)
+    current_scene = "私聊" if current_is_dm else get_channel_name(current_channel)
     
     dm_history = user.get("dm_history", [])
     channel_history = user.get("channel_history", [])
     last_channel = user.get("last_channel", "")
-    last_channel_name = get_channel_name(last_channel) if last_channel else "#频道"
+    other_scene = get_channel_name(last_channel) if last_channel else "#频道"
     
     tagged_history = []
     
+    # 私聊历史
     for i, m in enumerate(dm_history):
         if not m.get("content"):
             continue
         tagged_history.append({
             "role": m["role"],
             "content": m["content"],
-            "scene": "私聊",
             "scene_tag": "[私聊]",
             "index": i * 2,
             "is_current": current_is_dm
         })
     
+    # 频道历史
     for i, m in enumerate(channel_history):
         if not m.get("content"):
             continue
         tagged_history.append({
             "role": m["role"],
             "content": m["content"],
-            "scene": "channel",
-            "scene_tag": f"[{last_channel_name}]",
+            "scene_tag": f"[{other_scene}]",
             "index": i * 2 + 1,
             "is_current": not current_is_dm
         })
@@ -836,6 +824,7 @@ Slack 格式规则：
 - 每条消息简短自然，像发微信
 - 不要太正式，轻松一点
 - 该回 1 条就 1 条，不要硬凑
+- *绝对不要分点列举！不要用 1. 2. 3. 或 • 这种格式！*
 
 *示例*：
 用户：在吗
@@ -1104,8 +1093,8 @@ def check_pending_clear(user_id, channel):
         print(f"[PendingClear] 用户 {user_id} 还剩 {remaining} 条消息后清空")
         
         if remaining <= 0:
-            clear_chat_logs(channel)
-            log_message(channel, None, None, is_reset=True)
+            clear_user_chat_logs(user_id)
+            log_message(user_id, channel, None, None, is_reset=True)
             del pending_clear_logs[user_id]
             print(f"[PendingClear] 用户 {user_id} 聊天记录已清空")
 
@@ -1151,21 +1140,20 @@ def process_message(user_id, channel, text, files=None, message_ts=None, msg_cou
         for file_info in files:
             file_type, content = process_file(file_info)
             if file_type == "image":
-                images.append(content)  # content 是 URL
+                images.append(content)
                 print(f"[File] 发现图片: {file_info.get('name')}")
             elif file_type == "text":
                 file_texts.append(content)
                 print(f"[File] 解析成功: {file_info.get('name')}")
-            elif content:  # error, unsupported, too_large
+            elif content:
                 file_texts.append(content)
                 print(f"[File] {file_type}: {file_info.get('name')}")
     
-    # 组合消息文本
     full_text = text
     if file_texts:
         full_text = (text + "\n\n" + "\n\n".join(file_texts)).strip()
 
-    log_message(channel, "user", full_text, username=display_name)
+    log_message(user_id, channel, "user", full_text, username=display_name)
 
     system = get_system_prompt(mode, user_id, channel, msg_count)
     messages = [{"role": "system", "content": system}]
@@ -1199,7 +1187,7 @@ def process_message(user_id, channel, text, files=None, message_ts=None, msg_cou
     visible_reply, has_hidden, original_reply, extra_actions = parse_hidden_commands(reply, user_id, channel)
 
     model_name = APIS.get(current_api, {}).get("model", current_api)
-    log_message(channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
+    log_message(user_id, channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
 
     current_history_key = "dm_history" if is_dm else "channel_history"
     if current_history_key not in user:
@@ -1257,7 +1245,7 @@ def delayed_process(user_id, channel, message_ts=None):
         typing_ts = send_slack(channel, "_Typing..._")
 
         display_name = get_display_name(user_id)
-        log_message(channel, "user", combined, username=display_name)
+        log_message(user_id, channel, "user", combined, username=display_name)
 
         if is_dm:
             user["dm_channel"] = channel
@@ -1279,7 +1267,7 @@ def delayed_process(user_id, channel, message_ts=None):
         visible_reply, has_hidden, original_reply, extra_actions = parse_hidden_commands(reply, user_id, channel)
 
         model_name = APIS.get(current_api, {}).get("model", "未知")
-        log_message(channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
+        log_message(user_id, channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
 
         current_history_key = "dm_history" if is_dm else "channel_history"
         if current_history_key not in user:
@@ -1322,6 +1310,7 @@ def events():
 
     event_id = data.get("event_id")
     if event_id in processed_events:
+        print(f"[Events] 重复事件，跳过: {event_id}")
         return jsonify({"ok": True})
     processed_events.add(event_id)
 
@@ -1345,6 +1334,17 @@ def events():
         text = re.sub(r'<@\w+>', '', raw_text).strip()
         message_ts = event.get("ts")
 
+        # 文件事件去重（用 message_ts 作为唯一标识）
+        if message_ts in processed_file_events:
+            print(f"[Events] 重复文件事件，跳过: {message_ts}")
+            return jsonify({"ok": True})
+        
+        files = event.get("files", [])
+        if files:
+            processed_file_events.add(message_ts)
+            if len(processed_file_events) > 1000:
+                processed_file_events.clear()
+
         if text.startswith("/"):
             print(f"[Events] 忽略斜杠命令: {text}")
             return jsonify({"ok": True})
@@ -1359,9 +1359,6 @@ def events():
             print(f"[Events] 不响应：非私聊、未@、不在对话中")
             return jsonify({"ok": True})
 
-        # 获取所有文件
-        files = event.get("files", [])
-        
         if not text and not files:
             return jsonify({"ok": True})
 
@@ -1371,7 +1368,6 @@ def events():
         user = all_data.get(user_id, {})
         mode = user.get("mode", "long")
 
-        # 有文件时不用短句模式的等待逻辑
         if mode == "short" and not files:
             if user_id not in pending_messages:
                 pending_messages[user_id] = []
@@ -1408,22 +1404,19 @@ def commands():
             try:
                 data = load_user_data()
                 if user_id in data:
-                    if is_dm:
-                        data[user_id]["dm_history"] = []
-                    else:
-                        data[user_id]["channel_history"] = []
-                    
+                    # 清除所有历史（私聊和频道）
+                    data[user_id]["dm_history"] = []
+                    data[user_id]["channel_history"] = []
                     data[user_id]["points_used"] = 0
                     save_user_data(data)
                 
-                if is_dm:
-                    scheds = load_schedules()
-                    if user_id in scheds:
-                        scheds[user_id] = {"timed": [], "daily": [], "special_dates": {}}
-                        save_schedules(scheds)
+                # 清除定时任务
+                scheds = load_schedules()
+                if user_id in scheds:
+                    scheds[user_id] = {"timed": [], "daily": [], "special_dates": {}}
+                    save_schedules(scheds)
                 
-                scene = "私聊" if is_dm else "频道"
-                print(f"[Reset] 用户 {user_id} {scene}历史已重置")
+                print(f"[Reset] 用户 {user_id} 所有历史已重置")
             except Exception as e:
                 print(f"[Error] 重置失败: {str(e)}")
         
@@ -1434,12 +1427,9 @@ def commands():
             "count": 5
         }
         
-        scene = "私聊" if is_dm else "频道"
-        extra_info = "、定时任务" if is_dm else ""
-        
         return jsonify({
             "response_type": "in_channel",
-            "text": f"✅ 已重置{scene}对话历史{extra_info}！（记忆保留）\n\n📝 聊天记录将在 *5 条消息后* 清空"
+            "text": f"✅ 已重置所有对话历史和定时任务！（记忆保留）\n\n📝 聊天记录将在 *5 条消息后* 清空"
         })
 
     if cmd == "/memory":
@@ -1637,7 +1627,7 @@ def run_scheduler():
                                     send_slack(target_channel, visible)
                                 
                                 model_name = APIS.get(current_api, {}).get("model", "AI")
-                                log_message(target_channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
+                                log_message(user_id, target_channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
                                 
                                 current_history_key = "dm_history" if is_dm else "channel_history"
                                 if current_history_key not in user:
@@ -1696,7 +1686,7 @@ def run_scheduler():
                                     send_slack(target_channel, visible)
                                 
                                 model_name = APIS.get(current_api, {}).get("model", "AI")
-                                log_message(target_channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
+                                log_message(user_id, target_channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
                                 
                                 current_history_key = "dm_history" if is_dm else "channel_history"
                                 if current_history_key not in user:
@@ -1734,7 +1724,9 @@ def run_scheduler():
                         messages = [{"role": "system", "content": system}]
                         history_messages = build_history_messages(user, target_channel, current_api)
                         messages.extend(history_messages)
+
                         reply = call_ai(messages, current_api)
+
                         if "[不发]" not in reply:
                             visible, has_hidden, original_reply, extra_actions = parse_hidden_commands(reply, user_id, target_channel)
                             
@@ -1746,7 +1738,7 @@ def run_scheduler():
                                     send_slack(target_channel, visible)
                                 
                                 model_name = APIS.get(current_api, {}).get("model", "AI")
-                                log_message(target_channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
+                                log_message(user_id, target_channel, "assistant", original_reply, model=model_name, hidden=has_hidden)
                                 
                                 current_history_key = "dm_history" if is_dm else "channel_history"
                                 if current_history_key not in user:
@@ -1757,23 +1749,31 @@ def run_scheduler():
                                 execute_extra_actions(extra_actions, user_id, target_channel, None, current_mode)
                                 
                                 print(f"[Scheduler] 已发送特殊日期消息给 {user_id}")
+
                 schedules[user_id] = user_schedules
+
             save_schedules(schedules)
             save_user_data(all_data)
+
         except Exception as e:
             print(f"[Scheduler] 出错: {str(e)}")
             import traceback
             traceback.print_exc()
+
         time.sleep(60)
+
 @app.route("/cron", methods=["GET", "POST"])
 def cron_job():
     return jsonify({"ok": True, "message": "Using background thread scheduler"})
+
 @app.route("/")
 def home():
     return "Bot is running! 🤖"
+
 scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
 scheduler_thread.start()
 print("[Startup] 后台定时任务线程已启动")
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
