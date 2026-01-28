@@ -1649,7 +1649,7 @@ def commands():
         
         return jsonify({"response_type": "ephemeral", "text": "❌ 只能 long 或 short"})
 
-    if cmd == "/dm":
+    if cmd == "/dmhistory":
         if is_dm:
             return jsonify({"response_type": "ephemeral", "text": "❌ 只能在频道使用"})
         
@@ -1665,7 +1665,7 @@ def commands():
             set_channel_dm_setting(user_id, channel, False)
             return jsonify({"response_type": "ephemeral", "text": "✅ 已关闭私聊记录"})
         
-                return jsonify({"response_type": "ephemeral", "text": "❌ /dm on 或 /dm off"})
+                return jsonify({"response_type": "ephemeral", "text": "❌ /dmhistory on 或 /dmhistory off"})
 
     if cmd == "/points":
         if is_unlimited_user(user_id):
