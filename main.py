@@ -291,12 +291,15 @@ def jsonbin_load(bin_id, default=None):
             f"https://api.jsonbin.io/v3/b/{bin_id}/latest",
             headers={"X-Master-Key": JSONBIN_API_KEY}, timeout=30
         )
+        print(f"[JSONBin] load {bin_id}: status={resp.status_code}")
         if resp.status_code == 200:
             record = resp.json().get("record", default or {})
             record.pop("init", None)
             return record
+        else:
+            print(f"[JSONBin] load 失败: {resp.text[:200]}")
     except Exception as e:
-        print(f"JSONBin 读取失败: {e}")
+        print(f"[JSONBin] load 出错: {e}")
     return default or {}
 
 # ========== 时间工具 ==========
@@ -1777,6 +1780,13 @@ def run_scheduler():
 
             all_data = load_user_data()
             schedules = load_schedules()
+            print(f"[Scheduler] 加载 schedules: {len(schedules)} 个用户") # 新增调试打印
+
+            # 如果 schedules 为空且不应该为空，跳过这次保存
+            if not schedules: # 新增保护逻辑
+                print(f"[Scheduler] schedules 为空，跳过本轮处理")
+                time.sleep(60)
+                continue
 
             for user_id, user in all_data.items():
                 dm_channel = user.get("dm_channel")
