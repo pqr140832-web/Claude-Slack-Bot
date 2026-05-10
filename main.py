@@ -1513,6 +1513,13 @@ def process_message(user_id, channel, text, files=None, message_ts=None, msg_cou
     else:
         if original:
             add_channel_message(channel, "BOT", "AI", original, is_bot=True)
+        # 回复后激活频道所有成员的对话状态，避免其他用户的消息被忽略
+        try:
+            members = get_channel_members(channel)
+            for member_id in members:
+                activate_channel_conversation(member_id, channel)
+        except Exception:
+            pass
 
     all_data[user_id] = user
     save_user_data(all_data)
@@ -1592,6 +1599,13 @@ def delayed_process(user_id, channel, message_ts=None):
     else:
         if original:
             add_channel_message(channel, "BOT", "AI", original, is_bot=True)
+        # 回复后激活频道所有成员的对话状态，避免其他用户的消息被忽略
+        try:
+            members = get_channel_members(channel)
+            for member_id in members:
+                activate_channel_conversation(member_id, channel)
+        except Exception:
+            pass
     
     user["last_active"] = now
     all_data[user_id] = user
