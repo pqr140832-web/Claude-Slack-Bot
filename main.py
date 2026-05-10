@@ -1643,6 +1643,13 @@ def events():
     text = re.sub(r'<@\w+>', '', raw_text).strip()
     message_ts = event.get("ts")
 
+    # message_ts去重：防止app_mention和message.channels两个事件触发两次回复
+    if message_ts in processed_events:
+        return jsonify({"ok": True})
+    processed_events.add(message_ts)
+    if len(processed_events) > 1000:
+        processed_events.clear()
+
     if message_ts in processed_file_events:
         return jsonify({"ok": True})
     
