@@ -132,7 +132,7 @@ APIS = {
 }
 
 DEFAULT_API = "sonnet"  # 小鸡农场 claude-sonnet-4-5 [官转1]
-UNLIMITED_USERS = ["sakuragochyan"]
+UNLIMITED_USERS = ["sakuragochyan", "ms-sydney"]
 POINTS_LIMIT = 20
 MEMORY_LIMIT = 2000
 CONVERSATION_TIMEOUT = 300
