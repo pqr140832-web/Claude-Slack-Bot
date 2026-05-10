@@ -173,6 +173,9 @@ MAX_REWORK_ATTEMPTS = 3  # 最大返工次数
 
 CN_TIMEZONE = timezone(timedelta(hours=8))
 
+import threading
+_channel_msg_lock = threading.Lock()
+
 processed_events = set()
 processed_file_events = set()
 pending_messages = {}
@@ -411,24 +414,25 @@ def save_channel_messages(data):
 
 def add_channel_message(channel_id, user_id, username, content, is_bot=False):
     try:
-        messages = load_channel_messages()
-        if channel_id not in messages:
-            messages[channel_id] = []
-        
-        messages[channel_id].append({
-            "user_id": user_id,
-            "username": username,
-            "content": content,
-            "timestamp": get_cn_time().timestamp(),
-            "time_str": get_timestamp(),
-            "is_bot": is_bot
-        })
-        
-        if len(messages[channel_id]) > 200:
-            messages[channel_id] = messages[channel_id][-200:]
-        
-        save_channel_messages(messages)
-        return len([m for m in messages[channel_id] if not m.get("is_bot")])
+        with _channel_msg_lock:
+            messages = load_channel_messages()
+            if channel_id not in messages:
+                messages[channel_id] = []
+            
+            messages[channel_id].append({
+                "user_id": user_id,
+                "username": username,
+                "content": content,
+                "timestamp": get_cn_time().timestamp(),
+                "time_str": get_timestamp(),
+                "is_bot": is_bot
+            })
+            
+            if len(messages[channel_id]) > 200:
+                messages[channel_id] = messages[channel_id][-200:]
+            
+            save_channel_messages(messages)
+        return len([m for m in messages.get(channel_id, []) if not m.get("is_bot")])
     except Exception as e:
         print(f"add_channel_message 出错: {e}")
         return 0
@@ -1008,10 +1012,27 @@ def build_history_messages(user, current_channel, api_name):
     
     all_msgs.sort(key=lambda x: x["timestamp"])
     
-    total = sum(estimate_tokens(m["content"]) for m in all_msgs)
-    while total > available and all_msgs:
-        removed = all_msgs.pop(0)
-        total -= estimate_tokens(removed["content"])
+    # 分开截断DM和频道消息，避免删除频道对话的中间部分
+    dm_msgs = [m for m in all_msgs if m["scene"] == "dm"]
+    ch_msgs = [m for m in all_msgs if m["scene"] == "channel"]
+    
+    ch_total = sum(estimate_tokens(m["content"]) for m in ch_msgs)
+    dm_total = sum(estimate_tokens(m["content"]) for m in dm_msgs)
+    
+    # 先截断DM，保留完整频道对话
+    while dm_total > 0 and ch_total + dm_total > available:
+        if dm_msgs:
+            removed = dm_msgs.pop(0)
+            dm_total -= estimate_tokens(removed["content"])
+        else:
+            break
+    
+    # DM截完还不够，再截频道（从最旧开始）
+    while ch_total + dm_total > available and ch_msgs:
+        removed = ch_msgs.pop(0)
+        ch_total -= estimate_tokens(removed["content"])
+    
+    all_msgs = sorted(dm_msgs + ch_msgs, key=lambda x: x["timestamp"])
     
     result = []
     for m in all_msgs:
