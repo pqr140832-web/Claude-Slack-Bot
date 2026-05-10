@@ -180,6 +180,37 @@ _channel_msg_lock = threading.Lock()
 MAX_CHANNEL_MSG_LEN = 3000
 MAX_DM_MSG_LEN = 5000
 MAX_DM_TOKENS_FOR_CHANNEL = 20000  # DM历史在频道上下文中的最大token占比
+MIN_CHANNEL_MSGS_KEEP = 30  # 强制保留最近N条频道消息，无论token预算
+
+# ========== 内存缓存 ==========
+# 避免 JSONBin 读后写不一致，所有写入同时更新内存缓存
+_channel_messages_cache = {}  # {channel_id: [msg, ...]}
+_channel_cache_lock = threading.Lock()
+_channel_cache_dirty = set()  # 需要回写JSONBin的channel
+def _get_channel_msgs_from_cache(channel_id):
+    """从内存缓存读取频道消息，缓存miss时从JSONBin加载"""
+    with _channel_cache_lock:
+        if channel_id in _channel_messages_cache:
+            return list(_channel_messages_cache[channel_id])
+    # 缓存没有，直接从JSONBin加载原始数据（不走get_channel_messages_since_reset避免循环）
+    try:
+        messages = load_channel_messages()
+        msgs = messages.get(channel_id, [])
+        with _channel_cache_lock:
+            _channel_messages_cache[channel_id] = list(msgs)
+        return list(msgs)
+    except:
+        return []
+
+def _add_to_channel_cache(channel_id, msg_dict):
+    """往内存缓存添加一条频道消息（不写JSONBin，由调用方决定）"""
+    with _channel_cache_lock:
+        if channel_id not in _channel_messages_cache:
+            _channel_messages_cache[channel_id] = []
+        _channel_messages_cache[channel_id].append(msg_dict)
+        if len(_channel_messages_cache[channel_id]) > 200:
+            _channel_messages_cache[channel_id] = _channel_messages_cache[channel_id][-200:]
+        _channel_cache_dirty.add(channel_id)
 
 processed_events = set()
 processed_file_events = set()
@@ -422,33 +453,40 @@ def add_channel_message(channel_id, user_id, username, content, is_bot=False):
         # 截断过长消息，防止文件内容撑爆token预算
         if len(content) > MAX_CHANNEL_MSG_LEN:
             content = content[:MAX_CHANNEL_MSG_LEN] + f"\n...(消息过长已截断，原始{len(content)}字)"
+        msg_dict = {
+            "user_id": user_id,
+            "username": username,
+            "content": content,
+            "timestamp": get_cn_time().timestamp(),
+            "time_str": get_timestamp(),
+            "is_bot": is_bot
+        }
+        # 先更新内存缓存（立即生效，下一个build_history能看到）
+        _add_to_channel_cache(channel_id, msg_dict)
+        # 异步回写JSONBin
         with _channel_msg_lock:
             messages = load_channel_messages()
             if channel_id not in messages:
                 messages[channel_id] = []
-            
-            messages[channel_id].append({
-                "user_id": user_id,
-                "username": username,
-                "content": content,
-                "timestamp": get_cn_time().timestamp(),
-                "time_str": get_timestamp(),
-                "is_bot": is_bot
-            })
-            
+            messages[channel_id].append(msg_dict)
             if len(messages[channel_id]) > 200:
                 messages[channel_id] = messages[channel_id][-200:]
-            
             save_channel_messages(messages)
-        return len([m for m in messages.get(channel_id, []) if not m.get("is_bot")])
+        return len(_get_channel_msgs_from_cache(channel_id))
     except Exception as e:
         print(f"add_channel_message 出错: {e}")
         return 0
 
 def get_channel_messages_since_reset(channel_id, reset_time=None):
     try:
-        messages = load_channel_messages()
-        msgs = messages.get(channel_id, [])
+        # 优先从内存缓存读取（避免JSONBin延迟）
+        with _channel_cache_lock:
+            if channel_id in _channel_messages_cache:
+                msgs = list(_channel_messages_cache[channel_id])
+            else:
+                messages = load_channel_messages()
+                msgs = messages.get(channel_id, [])
+                _channel_messages_cache[channel_id] = list(msgs)
         if reset_time:
             msgs = [m for m in msgs if m.get("timestamp", 0) > reset_time]
         return msgs
@@ -457,6 +495,10 @@ def get_channel_messages_since_reset(channel_id, reset_time=None):
 
 def get_recent_channel_messages(channel_id, count=10):
     try:
+        # 优先从内存缓存读取
+        with _channel_cache_lock:
+            if channel_id in _channel_messages_cache:
+                return list(_channel_messages_cache[channel_id][-count:])
         messages = load_channel_messages()
         return messages.get(channel_id, [])[-count:]
     except:
@@ -1025,29 +1067,36 @@ def build_history_messages(user, current_channel, api_name):
                 "scene": "channel", "is_current": True
             })
     
-    all_msgs.sort(key=lambda x: x["timestamp"])
-    
-    # 分开截断DM和频道消息，避免删除频道对话的中间部分
+    # ========== 新截断策略：DM和频道完全分离，频道消息强制保留最近N条 ==========
     dm_msgs = [m for m in all_msgs if m["scene"] == "dm"]
     ch_msgs = [m for m in all_msgs if m["scene"] == "channel"]
     
     ch_total = sum(estimate_tokens(m["content"]) for m in ch_msgs)
     dm_total = sum(estimate_tokens(m["content"]) for m in dm_msgs)
     
-    # 先截断DM，保留完整频道对话
-    while dm_total > 0 and ch_total + dm_total > available:
-        if dm_msgs:
-            removed = dm_msgs.pop(0)
-            dm_total -= estimate_tokens(removed["content"])
-        else:
-            break
+    # 强制保留最近MIN_CHANNEL_MSGS_KEEP条频道消息，确保短期记忆完整
+    ch_protected = ch_msgs[-MIN_CHANNEL_MSGS_KEEP:] if len(ch_msgs) > MIN_CHANNEL_MSGS_KEEP else list(ch_msgs)
+    ch_protected_tokens = sum(estimate_tokens(m["content"]) for m in ch_protected)
     
-    # DM截完还不够，再截频道（从最旧开始）
-    while ch_total + dm_total > available and ch_msgs:
-        removed = ch_msgs.pop(0)
-        ch_total -= estimate_tokens(removed["content"])
+    # 可截断的频道消息（保护范围之外的旧消息）
+    ch_trimmable = ch_msgs[:-MIN_CHANNEL_MSGS_KEEP] if len(ch_msgs) > MIN_CHANNEL_MSGS_KEEP else []
+    ch_trimmable_tokens = sum(estimate_tokens(m["content"]) for m in ch_trimmable)
     
-    all_msgs = sorted(dm_msgs + ch_msgs, key=lambda x: x["timestamp"])
+    # 计算DM可用空间：总预算 - 保护频道消息
+    dm_budget = available - ch_protected_tokens
+    
+    # 截断DM到预算内
+    while dm_total > dm_budget and dm_msgs:
+        removed = dm_msgs.pop(0)
+        dm_total -= estimate_tokens(removed["content"])
+    
+    # 如果DM截完还不够，再截频道旧消息（不碰保护的最近N条）
+    while ch_protected_tokens + ch_trimmable_tokens + dm_total > available and ch_trimmable:
+        removed = ch_trimmable.pop(0)
+        ch_trimmable_tokens -= estimate_tokens(removed["content"])
+    
+    # 最终合并：DM + 可截断频道（剩余） + 保护频道（完整保留）
+    all_msgs = sorted(dm_msgs + ch_trimmable + ch_protected, key=lambda x: x["timestamp"])
     
     result = []
     for m in all_msgs:
@@ -1775,6 +1824,9 @@ def commands():
                 else:
                     data[user_id].setdefault("channel_reset_times", {})[channel] = get_cn_time().timestamp()
                 save_user_data(data)
+            # 同时清空该频道的内存缓存
+            with _channel_cache_lock:
+                _channel_messages_cache.pop(channel, None)
             print(f"[Reset] 重置完成")
         
         threading.Thread(target=do_reset).start()
@@ -1880,6 +1932,20 @@ def commands():
             status_msg = "👍 良好"
         
         return jsonify({"response_type": "ephemeral", "text": f"AI 积分: {points}/{AI_POINTS_MAX} {status_msg}"})
+
+    if cmd == "/clearchannel":
+        if is_dm:
+            return jsonify({"response_type": "ephemeral", "text": "❌ 只能在频道使用"})
+        def do_clear():
+            with _channel_cache_lock:
+                _channel_messages_cache.pop(channel, None)
+                _channel_cache_dirty.discard(channel)
+            messages = load_channel_messages()
+            messages[channel] = []
+            save_channel_messages(messages)
+            print(f"[ClearChannel] 已清空频道 {channel} 的消息历史")
+        threading.Thread(target=do_clear).start()
+        return jsonify({"response_type": "in_channel", "text": f"✅ 已清空 {get_channel_name(channel)} 的消息历史，Claude将以干净状态重新开始"})
 
     return jsonify({"response_type": "ephemeral", "text": "未知命令"})
 
