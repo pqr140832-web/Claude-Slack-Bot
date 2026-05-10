@@ -176,6 +176,11 @@ CN_TIMEZONE = timezone(timedelta(hours=8))
 import threading
 _channel_msg_lock = threading.Lock()
 
+# 消息长度限制，防止大文件内容撑爆token预算
+MAX_CHANNEL_MSG_LEN = 3000
+MAX_DM_MSG_LEN = 5000
+MAX_DM_TOKENS_FOR_CHANNEL = 20000  # DM历史在频道上下文中的最大token占比
+
 processed_events = set()
 processed_file_events = set()
 pending_messages = {}
@@ -414,6 +419,9 @@ def save_channel_messages(data):
 
 def add_channel_message(channel_id, user_id, username, content, is_bot=False):
     try:
+        # 截断过长消息，防止文件内容撑爆token预算
+        if len(content) > MAX_CHANNEL_MSG_LEN:
+            content = content[:MAX_CHANNEL_MSG_LEN] + f"\n...(消息过长已截断，原始{len(content)}字)"
         with _channel_msg_lock:
             messages = load_channel_messages()
             if channel_id not in messages:
@@ -579,7 +587,7 @@ def estimate_tokens(text):
         return 0
     chinese = len(re.findall(r'[\u4e00-\u9fff]', str(text)))
     other = len(str(text)) - chinese
-    return int(chinese / 1.5 + other / 4)
+    return int(chinese / 1.5 + other / 3.0)
 
 def build_review_context(user, current_channel, user_message, ai_reply, msg_count):
     """构建用于审查的上下文，限制在 REVIEW_TOKEN_LIMIT 内"""
@@ -979,15 +987,22 @@ def build_history_messages(user, current_channel, api_name):
     
     all_msgs = []
     
-    # 私聊历史
+    # 私聊历史（限制在频道上下文中的token占比）
     if include_dm or current_is_dm:
+        dm_msgs = []
         for m in user.get("dm_history", []):
             if m.get("content"):
-                all_msgs.append({
+                dm_msgs.append({
                     "role": m["role"], "content": m["content"],
                     "timestamp": m.get("timestamp", 0),
                     "scene": "dm", "is_current": current_is_dm
                 })
+        # 在频道上下文中，限制DM历史最多占MAX_DM_TOKENS_FOR_CHANNEL
+        if not current_is_dm and dm_msgs:
+            dm_total = sum(estimate_tokens(m["content"]) for m in dm_msgs)
+            while dm_total > MAX_DM_TOKENS_FOR_CHANNEL and dm_msgs:
+                dm_total -= estimate_tokens(dm_msgs.pop(0)["content"])
+        all_msgs.extend(dm_msgs)
     
     # 频道历史
     if not current_is_dm:
@@ -1528,9 +1543,11 @@ def process_message(user_id, channel, text, files=None, message_ts=None, msg_cou
     if is_dm:
         user.setdefault("dm_history", [])
         if full_text:
-            user["dm_history"].append({"role": "user", "content": full_text, "timestamp": now})
+            stored = full_text if len(full_text) <= MAX_DM_MSG_LEN else full_text[:MAX_DM_MSG_LEN] + f"\n...(已截断，原始{len(full_text)}字)"
+            user["dm_history"].append({"role": "user", "content": stored, "timestamp": now})
         if original:
-            user["dm_history"].append({"role": "assistant", "content": original, "timestamp": now + 0.001})
+            stored = original if len(original) <= MAX_DM_MSG_LEN else original[:MAX_DM_MSG_LEN] + f"\n...(已截断，原始{len(original)}字)"
+            user["dm_history"].append({"role": "assistant", "content": stored, "timestamp": now + 0.001})
     else:
         if original:
             add_channel_message(channel, "BOT", "AI", original, is_bot=True)
@@ -1614,9 +1631,11 @@ def delayed_process(user_id, channel, message_ts=None):
     if is_dm:
         user.setdefault("dm_history", [])
         if combined:
-            user["dm_history"].append({"role": "user", "content": combined, "timestamp": now})
+            stored = combined if len(combined) <= MAX_DM_MSG_LEN else combined[:MAX_DM_MSG_LEN] + f"\n...(已截断，原始{len(combined)}字)"
+            user["dm_history"].append({"role": "user", "content": stored, "timestamp": now})
         if original:
-            user["dm_history"].append({"role": "assistant", "content": original, "timestamp": now + 0.001})
+            stored = original if len(original) <= MAX_DM_MSG_LEN else original[:MAX_DM_MSG_LEN] + f"\n...(已截断，原始{len(original)}字)"
+            user["dm_history"].append({"role": "assistant", "content": stored, "timestamp": now + 0.001})
     else:
         if original:
             add_channel_message(channel, "BOT", "AI", original, is_bot=True)
