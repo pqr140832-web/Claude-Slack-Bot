@@ -131,8 +131,8 @@ APIS = {
         "cost": 10
     },
     "小E-claude-opus-4-6": {
-        "url": os.environ.get("API_URL_R"),
-        "key": os.environ.get("API_KEY_R"),
+        "url": os.environ.get("API_URL_2"),
+        "key": os.environ.get("API_KEY_2"),
         "model": "claude-opus-4-6",
         "vision": True,
         "cost": 10
