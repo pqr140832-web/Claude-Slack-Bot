@@ -131,7 +131,7 @@ APIS = {
     },
 }
 
-DEFAULT_API = "sonnet"  # 小鸡农场 claude-sonnet-4-5 [官转1]
+DEFAULT_API = "gptsapi-sonnet"  # 小鸡农场挂了，临时切到gptsapi
 UNLIMITED_USERS = ["sakuragochyan", "ms-sydney"]
 POINTS_LIMIT = 20
 MEMORY_LIMIT = 2000
