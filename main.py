@@ -39,6 +39,7 @@ API_TOKEN_LIMITS = {
     "code opus": 190000,
     "啾啾sonnet": 190000,
     "啾啾opus": 190000,
+    "R-claude-opus-4-6": 190000,
 }
 
 APIS = {
@@ -129,9 +130,16 @@ APIS = {
         "vision": True,
         "cost": 10
     },
+    "R-claude-opus-4-6": {
+        "url": os.environ.get("API_URL_R"),
+        "key": os.environ.get("API_KEY_R"),
+        "model": "claude-opus-4-6",
+        "vision": True,
+        "cost": 10
+    },
 }
 
-DEFAULT_API = "gptsapi-sonnet"  # 小鸡农场挂了，临时切到gptsapi
+DEFAULT_API = "R-claude-opus-4-6"  # gptsapi余额耗尽，切到R
 UNLIMITED_USERS = ["sakuragochyan", "ms-sydney"]
 POINTS_LIMIT = 20
 MEMORY_LIMIT = 2000
