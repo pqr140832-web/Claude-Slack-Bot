@@ -1567,6 +1567,7 @@ def delayed_process(user_id, channel, message_ts=None):
     else:
         user["last_channel"] = channel
         user.setdefault("channel_last_active", {})[channel] = now
+        add_channel_message(channel, user_id, display_name, combined)
     
     all_data[user_id] = user
     save_user_data(all_data)
