@@ -39,6 +39,8 @@ API_TOKEN_LIMITS = {
     "code opus": 190000,
     "啾啾sonnet": 190000,
     "啾啾opus": 190000,
+    "R-claude-opus-4-6": 190000,
+    "小E-claude-opus-4-6-thinking": 190000,
     "小E-claude-opus-4-6": 190000,
 }
 
@@ -127,6 +129,20 @@ APIS = {
         "url": os.environ.get("API_URL_3"),
         "key": os.environ.get("API_KEY_3"),
         "model": "[啾啾]claude-opus-4-5-20251101",
+        "vision": True,
+        "cost": 10
+    },
+    "R-claude-opus-4-6": {
+        "url": os.environ.get("API_URL_2"),
+        "key": os.environ.get("API_KEY_2"),
+        "model": "claude-opus-4-6",
+        "vision": True,
+        "cost": 10
+    },
+    "小E-claude-opus-4-6-thinking": {
+        "url": os.environ.get("API_URL_2"),
+        "key": os.environ.get("API_KEY_2"),
+        "model": "claude-opus-4-6",
         "vision": True,
         "cost": 10
     },
