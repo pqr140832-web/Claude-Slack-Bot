@@ -29,7 +29,10 @@ JSONBIN_CHANNEL_MESSAGES = os.environ.get("JSONBIN_CHANNEL_MESSAGES")
 API_TOKEN_LIMITS = {
     "第三方sonnet": 110000,
     "sonnet": 190000,
+    "sonnet-thinking": 190000,
     "opus": 190000,
+    "opus-4.7": 190000,
+    "haiku": 190000,
     "code haiku": 190000,
     "code sonnet": 190000,
     "code opus": 190000,
@@ -38,26 +41,49 @@ API_TOKEN_LIMITS = {
 }
 
 APIS = {
+    # === 新API (gptsapi) ===
+    "sonnet": {
+        "url": "https://api.gptsapi.net/v1/chat/completions",
+        "key": "sk-H4va4c84c4791ef6216efba7cd161d478916efb2c45ICCXz",
+        "model": "claude-sonnet-4-6",
+        "vision": True,
+        "cost": 4
+    },
+    "sonnet-thinking": {
+        "url": "https://api.gptsapi.net/v1/chat/completions",
+        "key": "sk-H4va4c84c4791ef6216efba7cd161d478916efb2c45ICCXz",
+        "model": "claude-sonnet-4-6-thinking",
+        "vision": True,
+        "cost": 5
+    },
+    "opus": {
+        "url": "https://api.gptsapi.net/v1/chat/completions",
+        "key": "sk-H4va4c84c4791ef6216efba7cd161d478916efb2c45ICCXz",
+        "model": "claude-opus-4-6",
+        "vision": True,
+        "cost": 10
+    },
+    "opus-4.7": {
+        "url": "https://api.gptsapi.net/v1/chat/completions",
+        "key": "sk-H4va4c84c4791ef6216efba7cd161d478916efb2c45ICCXz",
+        "model": "claude-opus-4-7",
+        "vision": True,
+        "cost": 10
+    },
+    "haiku": {
+        "url": "https://api.gptsapi.net/v1/chat/completions",
+        "key": "sk-H4va4c84c4791ef6216efba7cd161d478916efb2c45ICCXz",
+        "model": "claude-haiku-4-5-20251001",
+        "vision": True,
+        "cost": 2
+    },
+    # === 旧API (通过环境变量配置) ===
     "第三方sonnet": {
         "url": os.environ.get("API_URL_1"),
         "key": os.environ.get("API_KEY_1"),
         "model": "[第三方逆1] claude-sonnet-4.5 [输出只有3~4k]",
         "vision": False,
         "cost": 1
-    },
-    "sonnet": {
-        "url": os.environ.get("API_URL_1"),
-        "key": os.environ.get("API_KEY_1"),
-        "model": "claude-sonnet-4-5 [官逆1]",
-        "vision": True,
-        "cost": 4
-    },
-    "opus": {
-        "url": os.environ.get("API_URL_2"),
-        "key": os.environ.get("API_KEY_2"),
-        "model": "福利-claude-opus-4-5",
-        "vision": True,
-        "cost": 2
     },
     "code haiku": {
         "url": os.environ.get("API_URL_3"),
@@ -96,7 +122,7 @@ APIS = {
     },
 }
 
-DEFAULT_API = "第三方sonnet"
+DEFAULT_API = "sonnet"
 UNLIMITED_USERS = ["sakuragochyan"]
 POINTS_LIMIT = 20
 MEMORY_LIMIT = 2000
