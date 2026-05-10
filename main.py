@@ -135,21 +135,21 @@ APIS = {
     "R Opus": {
         "url": os.environ.get("API_URL_2"),
         "key": os.environ.get("API_KEY_2"),
-        "model": "claude-opus-4-6",
+        "model": "R-claude-opus-4-6",
         "vision": True,
         "cost": 10
     },
     "小E Opus thinking": {
         "url": os.environ.get("API_URL_2"),
         "key": os.environ.get("API_KEY_2"),
-        "model": "claude-opus-4-6",
+        "model": "小E-claude-opus-4-6-thinking",
         "vision": True,
         "cost": 10
     },
     "小E Opus": {
         "url": os.environ.get("API_URL_2"),
         "key": os.environ.get("API_KEY_2"),
-        "model": "claude-opus-4-6",
+        "model": "小E-claude-opus-4-6",
         "vision": True,
         "cost": 10
     },
