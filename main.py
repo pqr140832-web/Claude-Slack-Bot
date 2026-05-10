@@ -1606,9 +1606,10 @@ def events():
     
     if event.get("type") not in ["app_mention", "message"]:
         return jsonify({"ok": True})
-    # 允许所有bot消息通过（bot间对话需要）
-    # if event.get("bot_id"):
-    #     return jsonify({"ok": True})
+    # 过滤自己的消息（防止死循环），但允许其他bot（如清言）
+    CLAUDE_BOT_IDS = ["B0AAJED3TEX", "B0AB9TGJBB3", "B056JA17RNU"]
+    if event.get("bot_id") and event.get("bot_id") in CLAUDE_BOT_IDS:
+        return jsonify({"ok": True})
     if event.get("subtype") and event.get("subtype") != "file_share":
         return jsonify({"ok": True})
 
